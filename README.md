@@ -38,10 +38,14 @@ bun run build
 claude mcp add browsteer -- bun run "$PWD/bridge/mcp.ts"
 ```
 
-**4. Load the extension in Firefox:** open `about:debugging#/runtime/this-firefox`
-→ *Load Temporary Add-on…* → pick `extension/manifest.json`. Temporary add-ons
-disappear when Firefox restarts — for a permanent install, `bun run sign`
-(needs AMO API credentials) and install the signed `.xpi`.
+**4. Install the extension in Firefox:** download `browsteer-<version>.xpi` from
+[GitHub Releases](https://github.com/ovidijusr/browsteer/releases) and open it
+with Firefox — it's AMO-signed (unlisted channel), so it installs permanently
+and survives restarts. For development instead, load it temporarily via
+`about:debugging#/runtime/this-firefox` → *Load Temporary Add-on…* →
+`extension/manifest.json` (drops on restart). New releases: bump `version` in
+`extension/manifest.json`, `bun run sign` (AMO credentials), attach the signed
+`.xpi` to a new GitHub release.
 
 **5. Copy the `/browse` skill** to `~/.claude/skills/browse/` if you use the
 slash command (it lives in the user's skills dir, not this repo).
