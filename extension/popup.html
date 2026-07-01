@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px -apple-system, system-ui, sans-serif; width: 260px; margin: 0; padding: 14px; color: #111; }
+    h1 { font-size: 13px; margin: 0 0 10px; color: #555; font-weight: 600; }
+    .key { font: 600 18px ui-monospace, Menlo, monospace; letter-spacing: .5px; background: #f3f4f6;
+           border-radius: 8px; padding: 10px 12px; text-align: center; user-select: all; }
+    .status { margin: 10px 0; font-size: 12px; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+    .on { background: #16a34a; } .off { background: #d1d5db; }
+    .row { display: flex; gap: 8px; margin-top: 10px; }
+    button { flex: 1; font: 12px inherit; padding: 7px; border: 1px solid #d1d5db; border-radius: 7px;
+             background: #fff; cursor: pointer; }
+    button:hover { background: #f9fafb; }
+    .hint { margin-top: 12px; font-size: 11px; color: #888; line-height: 1.4; }
+    code { background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Browsteer</h1>
+  <div class="key" id="key">…</div>
+  <div class="status"><span class="dot off" id="dot"></span><span id="statusText">checking…</span></div>
+  <div class="row">
+    <button id="copy">Copy /browse command</button>
+    <button id="regen">Regenerate</button>
+  </div>
+  <div class="hint">In Claude Code: <code>/browse <span id="hintKey">key</span> &lt;task&gt;</code></div>
+  <div class="row"><button id="pick">🎯 Pick element scope</button></div>
+  <div class="hint" id="lastpick"></div>
+  <script src="./dist/popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>FlyCheap — results</title>
+</head>
+<body>
+  <!-- Noise that SHOULD be pruned -->
+  <div aria-hidden="true" class="cookie-banner" style="padding:8px">
+    We use cookies. <button>Accept all</button>
+  </div>
+  <nav aria-label="Primary">
+    <a href="/">Home</a><a href="/deals">Deals</a><a href="/help">Help</a>
+  </nav>
+
+  <!-- The useful content -->
+  <main>
+    <h1>Flights London → Vilnius</h1>
+
+    <form role="search" aria-label="Flight search">
+      <label for="dest">Destination</label>
+      <input id="dest" type="search" placeholder="Where to?" value="Vilnius" />
+      <label for="date">Date</label>
+      <input id="date" type="text" value="2026-07-01" />
+      <button type="button" id="searchBtn">Search</button>
+    </form>
+
+    <ul aria-label="Results">
+      <li>
+        <span class="airline">Ryanair</span>
+        <span class="time">06:40 → 10:05</span>
+        <span class="price">€78</span>
+        <button aria-label="Select Ryanair 06:40">Select</button>
+      </li>
+      <li>
+        <span class="airline">Wizz Air</span>
+        <span class="time">11:20 → 14:35</span>
+        <span class="price">€64</span>
+        <button aria-label="Select Wizz Air 11:20">Select</button>
+      </li>
+      <li>
+        <span class="airline">airBaltic</span>
+        <span class="time">18:05 → 21:20</span>
+        <span class="price">€112</span>
+        <button aria-label="Select airBaltic 18:05">Select</button>
+      </li>
+    </ul>
+    <p id="status">3 results</p>
+  </main>
+
+  <footer>
+    <nav aria-label="Footer">
+      <ul>
+        <li><a href="/about">About Us</a></li>
+        <li><a href="/careers">Careers</a></li>
+        <li><a href="/press">Press</a></li>
+        <li><a href="/investors">Investor Relations</a></li>
+        <li><a href="/affiliates">Affiliate Program</a></li>
+        <li><a href="/sitemap">Sitemap</a></li>
+        <li><a href="/accessibility">Accessibility</a></li>
+        <li><a href="/cookies">Cookie Preferences</a></li>
+      </ul>
+    </nav>
+    <p>© 2026 FlyCheap Operating Company, LLC. All Rights Reserved. The FlyCheap word mark is a registered trademark.</p>
+    <p>Use of this Site is subject to express Terms of Use. By using this site you agree to be bound by these terms and our Privacy Policy.</p>
+    <p>Fares are subject to availability and may change without notice. Additional baggage and service fees may apply.</p>
+  </footer>
+
+  <script>
+    // Simulate an SPA action: clicking Search updates the status text.
+    document.getElementById('searchBtn').addEventListener('click', () => {
+      document.getElementById('status').textContent =
+        'Searching for ' + document.getElementById('dest').value + '…';
+    });
+  </script>
+</body>
+</html>
