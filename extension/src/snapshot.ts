@@ -143,7 +143,29 @@ export function accessibleName(el: Element): string {
   // 6. buttons/links/headings: their own visible text (capped)
   const role = roleOf(el);
   if (role === "button" || role === "link" || role === "heading" || role === "option" || role === "tab") {
-    return clean(el.textContent).slice(0, 120);
+    const text = clean(el.textContent).slice(0, 120);
+    if (text) return text;
+    // Image-only controls have NO text, so the walk above yields "" and every
+    // icon button / figure link on the page prints as an indistinguishable
+    // `[18] link`. The real accname algorithm recurses into children, where an
+    // <img> contributes its alt and an inline <svg> its <title>; do the same.
+    return descendantLabel(el);
+  }
+  return "";
+}
+
+// The label an image-only control borrows from its contents, in accname order.
+function descendantLabel(el: Element): string {
+  for (const child of el.querySelectorAll("img, svg, [aria-label]")) {
+    let n = "";
+    if (child.tagName === "IMG") {
+      n = clean((child as HTMLImageElement).alt) || clean(child.getAttribute("title"));
+    } else if (child.tagName.toLowerCase() === "svg") {
+      n = clean(child.getAttribute("aria-label")) || clean(child.querySelector("title")?.textContent);
+    } else {
+      n = clean(child.getAttribute("aria-label"));
+    }
+    if (n) return n.slice(0, 120);
   }
   return "";
 }

@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { listingPage, searchResultsPage } from "./fixtures";
-import { snapshot, collectLinks, factorUrls, type Filter } from "../extension/src/snapshot";
+import { snapshot, collectLinks, factorUrls, accessibleName, type Filter } from "../extension/src/snapshot";
 
 const LISTING_URL = "https://suchen.mobile.de/fahrzeuge/details.html?id=453073528";
 const SEARCH_URL = "https://suchen.mobile.de/fahrzeuge/search.html?vc=Car&sb=p";
@@ -244,5 +244,44 @@ describe("browser_links", () => {
     const r = collectLinks(doc, { limit: 5 });
     expect(r.links.length).toBe(5);
     expect(r.total).toBe(21); // 20 cards + the footer link
+  });
+});
+
+describe("image-only control naming", () => {
+  const nameOf = (html: string) => {
+    const doc = docOf(`<body>${html}</body>`, "https://example.com/");
+    return accessibleName(doc.querySelector("a, button") as Element);
+  };
+
+  // Regression: a real itch.io devlog figure printed as a bare `[18] link`
+  // even though its <img> carried alt="Depth buffer".
+  test("a link wrapping an <img> borrows the img's alt", () => {
+    expect(
+      nameOf(`<a href="/z"><img title="Depth buffer" alt="Depth buffer" src="z.png"></a>`)
+    ).toBe("Depth buffer");
+  });
+
+  test("falls back to the img's title when alt is empty", () => {
+    expect(nameOf(`<a href="/z"><img alt="" title="Sea floor" src="z.png"></a>`)).toBe("Sea floor");
+  });
+
+  test("an icon button borrows its inline svg's <title>", () => {
+    expect(nameOf(`<button><svg><title>Close</title><path d="M0 0"/></svg></button>`)).toBe("Close");
+  });
+
+  test("an aria-label on a descendant is used when there is no img or svg", () => {
+    expect(nameOf(`<a href="/z"><span aria-label="Play" class="i"></span></a>`)).toBe("Play");
+  });
+
+  test("the control's own text still wins over descendant labels", () => {
+    expect(nameOf(`<a href="/z">Read more<img alt="arrow" src="z.png"></a>`)).toBe("Read more");
+  });
+
+  test("an unlabelled image-only link is still nameless (no invented text)", () => {
+    expect(nameOf(`<a href="/z"><img src="z.png"></a>`)).toBe("");
+  });
+
+  test("aria-label on the control itself keeps precedence", () => {
+    expect(nameOf(`<a href="/z" aria-label="Home"><img alt="logo" src="z.png"></a>`)).toBe("Home");
   });
 });
