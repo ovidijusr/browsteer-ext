@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browsteer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Pair this browser with a local Claude Code instance and drive it via a token-efficient accessibility snapshot.",
   "icons": { "48": "icon.svg", "96": "icon.svg", "128": "icon.svg" },
   "permissions": ["tabs", "activeTab", "scripting", "storage", "alarms"],

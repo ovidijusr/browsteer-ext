@@ -95,10 +95,13 @@ function connect() {
       const tabId = await targetTabId(req.params);
       if (req.op === "navigate") {
         await browser.tabs.update(tabId, { url: req.params.url });
-        ws?.send(JSON.stringify({ id: req.id, ok: true, result: { url: req.params.url } }));
+        ws?.send(JSON.stringify({ id: req.id, ok: true, result: { url: req.params.url, tabId } }));
         return;
       }
       const resp: any = await browser.tabs.sendMessage(tabId, { op: req.op, params: req.params });
+      // Tell the hub which tab actually served this op, so it can auto-pin and
+      // detect drift instead of silently answering about a different page.
+      if (resp?.ok && resp.result && typeof resp.result === "object") resp.result.tabId = tabId;
       ws?.send(JSON.stringify({ id: req.id, ...resp }));
     } catch (e: any) {
       ws?.send(JSON.stringify({ id: req.id, ok: false, error: String(e?.message ?? e) }));

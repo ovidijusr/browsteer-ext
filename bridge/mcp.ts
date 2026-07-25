@@ -79,11 +79,30 @@ tool("browser_snapshot", {
     "as `=\"value\"`, `*disabled`, `*selected`, etc. Refs are valid ONLY until the " +
     "next navigation/snapshot — re-snapshot after each action. Set interactiveOnly " +
     "to drop all text and return just the actionable refs (cheapest; for pure action steps). " +
-    "A saved pruning filter whose URL pattern matches is applied automatically (chrome removed); " +
-    "set raw:true to bypass all filters (fallback when something seems to be missing).",
+    "A saved pruning filter whose URL pattern matches is applied automatically (chrome removed). " +
+    "Three reductions also run by default and are reported in the header so you can audit them: " +
+    "runs of 5+ look-alike sibling controls collapse to one ranged line `[13-43] button \"Weiter 1…31\" ×31 collapsed` " +
+    "(every ref in the range is still individually clickable); a subtree repeated verbatim later on the page " +
+    "becomes `↩ identical to an earlier block`; and universal chrome (footer/contentinfo, Google-Maps widgets, " +
+    "consent containers) is dropped. Set raw:true to bypass filters AND all three reductions — " +
+    "the fallback when something you expected seems to be missing.",
   inputSchema: {
     interactiveOnly: z.boolean().optional().describe("Only list actionable (clickable/fillable) elements; omit page text. Cheapest."),
-    raw: z.boolean().optional().describe("Bypass any saved pruning filter and return the full page (fallback)."),
+    raw: z.boolean().optional().describe("Bypass saved filters and all reduction passes; return the unprocessed page (fallback)."),
+  },
+});
+
+tool("browser_links", {
+  title: "List links (cheap navigation)",
+  description:
+    "Return just the links under the page (or under one [ref] subtree) as `label ⇢ url`. " +
+    "Use this instead of browser_html when you only need somewhere to navigate to — a snapshot " +
+    "costs thousands of tokens and contains no URLs at all, and browser_html on a list page gets " +
+    "truncated. The shared head/tail of the URLs is hoisted into the header once, so each row is " +
+    "just the part that differs; join header prefix + row + header suffix to rebuild a full URL.",
+  inputSchema: {
+    ref: z.number().int().optional().describe("Scope to this element's subtree (e.g. one result card). Omit for the whole page."),
+    limit: z.number().int().optional().describe("Max links to return (default 200)."),
   },
 });
 
@@ -153,8 +172,10 @@ tool("browser_pin", {
   title: "Pin / unpin the target tab",
   description:
     "Lock all actions onto a specific tab (from browser_tabs) so they stop following the " +
-    "focused tab. Pass a tabId to pin; omit tabId to unpin (back to active-tab). Pinning " +
-    "prevents the silent tab-drift where snapshots/clicks land on a tab you switched away to.",
+    "focused tab. Pass a tabId to pin; omit tabId to unpin (back to active-tab, and auto-pinning " +
+    "stays off for the rest of the session). NOTE: the first op that reaches a tab auto-pins to it " +
+    "and says so, so you normally don't need this — reach for it to move to a different tab, or " +
+    "after a 'Refusing to return the snapshot' drift error.",
   inputSchema: { tabId: z.number().int().optional().describe("Tab id from browser_tabs; omit to unpin") },
 });
 
@@ -194,7 +215,7 @@ tool("browser_save_filter", {
     extract: z.object({
       item: z.string().describe("CSS selector for each repeating item (e.g. 'a.announcement-item')"),
       fields: z.array(z.object({ name: z.string(), sel: z.string().optional() })).describe("Per-field selectors relative to the item; omit sel to use the item's own text"),
-    }).optional().describe("Extraction mode: emit one compact positional row per item from DOM fields (no truncation). Overrides prune output."),
+    }).optional().describe("Extraction mode: emit one compact positional row per item from DOM fields (no truncation). Each row also gets an implicit trailing `url` field (the item's own href or its first descendant link) with the shared head/tail factored into the legend — so you can navigate straight from a list without a browser_html detour. Overrides prune output."),
   },
 });
 

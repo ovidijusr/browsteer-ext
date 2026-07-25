@@ -7,7 +7,11 @@ import { join } from "node:path";
 // process's cwd AND of where the repo is checked out. (A relative path silently
 // created a second DB wherever the bridge was launched; even a source-anchored
 // path would break if the project moved. One absolute home-dir store avoids both.)
-const DB_DIR = join(homedir(), ".browsteer");
+//
+// BROWSTEER_DB_DIR overrides it, so tests get an isolated store instead of
+// reading the real saved filters (which would make them non-deterministic) and
+// writing into the real action log.
+const DB_DIR = process.env.BROWSTEER_DB_DIR || join(homedir(), ".browsteer");
 mkdirSync(DB_DIR, { recursive: true });
 const DB_PATH = join(DB_DIR, "browsteer.db");
 const db = new Database(DB_PATH, { create: true });

@@ -1,342 +1,20 @@
-// Content script — runs in every page. Builds a token-efficient accessibility
-// snapshot and executes click/fill/read actions on behalf of the bridge.
+// Content script — runs in every page. Executes click/fill/read actions on
+// behalf of the bridge and returns accessibility snapshots.
 //
-// THE BIG IDEA: instead of shipping raw HTML, we reduce the page to its
-// *accessibility* essence — the same semantic model a screen reader consumes:
-//   • role         (button / textbox / link / heading / listitem / row / ...)
-//   • accessible name (computed via a pragmatic subset of the ARIA accname algo)
-//   • state        (expanded / selected / checked / current / disabled / value)
-// We prune aria-hidden + presentational wrappers, which strips nav bars, cookie
-// banners, ads, and footers — most of the tokens, and most of the noise.
+// The snapshot/serialisation core lives in ./snapshot.ts, which is pure
+// DOM-in/string-out so it can be unit-tested without a browser. This file keeps
+// the parts that genuinely need the page: actions, the element picker, and the
+// extension message plumbing.
 //
 // `browser` is the global provided by @types/firefox-webext-browser.
-
-// Ephemeral ref → element map. Rebuilt on every snapshot. Refs are ONLY valid
-// until the next snapshot/navigation (documented to Claude in the tool desc).
-let refMap = new Map<number, Element>();
-
-// ── Roles ────────────────────────────────────────────────────────────────────
-const IMPLICIT_ROLE: Record<string, string> = {
-  A: "link", BUTTON: "button", SELECT: "combobox", TEXTAREA: "textbox",
-  NAV: "navigation", MAIN: "main", HEADER: "banner", FOOTER: "contentinfo",
-  ASIDE: "complementary", FORM: "form", SECTION: "region", ARTICLE: "article",
-  H1: "heading", H2: "heading", H3: "heading", H4: "heading", H5: "heading", H6: "heading",
-  UL: "list", OL: "list", LI: "listitem",
-  TABLE: "table", TR: "row", TD: "cell", TH: "columnheader", IMG: "img",
-};
-
-function roleOf(el: Element): string {
-  const explicit = el.getAttribute("role");
-  if (explicit) return explicit.trim().split(/\s+/)[0];
-  if (el.tagName === "INPUT") {
-    const t = (el as HTMLInputElement).type;
-    if (t === "checkbox") return "checkbox";
-    if (t === "radio") return "radio";
-    if (t === "button" || t === "submit" || t === "reset") return "button";
-    if (t === "search") return "searchbox";
-    if (t === "range") return "slider";
-    if (t === "hidden") return "";
-    return "textbox";
-  }
-  return IMPLICIT_ROLE[el.tagName] ?? "";
-}
-
-// Roles that are interactive (always worth a ref) vs structural (give shape).
-const INTERACTIVE_ROLES = new Set([
-  "link", "button", "textbox", "searchbox", "combobox", "checkbox", "radio",
-  "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "option", "slider",
-  "switch", "spinbutton",
-]);
-const STRUCTURAL_ROLES = new Set([
-  "heading", "listitem", "row", "cell", "columnheader", "rowheader",
-  "article", "region", "main", "navigation", "search", "form", "list",
-  "table", "dialog", "alert", "status",
-]);
-
-// Roles whose accessible name already captures their text content, so we don't
-// descend into their children (avoids "[2] link \"Home\"" + redundant "[3] text \"Home\"").
-const NAME_IS_CONTENT = new Set([
-  "button", "link", "heading", "tab", "option", "menuitem", "checkbox", "radio", "switch",
-]);
-
-const SKIP_TAGS = new Set([
-  "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "PATH", "HEAD", "META", "LINK",
-]);
-
-// ── Accessible name (pragmatic ARIA accname subset, à la axe-core/Playwright) ──
-function clean(s: string | null | undefined): string {
-  return (s ?? "").replace(/\s+/g, " ").trim();
-}
-
-function accessibleName(el: Element): string {
-  // 1. aria-labelledby → concatenated text of referenced nodes
-  const labelledby = el.getAttribute("aria-labelledby");
-  if (labelledby) {
-    const txt = labelledby
-      .split(/\s+/)
-      .map((id) => clean(document.getElementById(id)?.textContent))
-      .filter(Boolean)
-      .join(" ");
-    if (txt) return txt;
-  }
-  // 2. aria-label
-  const label = clean(el.getAttribute("aria-label"));
-  if (label) return label;
-  // 3. form controls: associated <label>, then placeholder
-  if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
-    // submit/button/reset inputs: their value attribute is the accessible name
-    if (el instanceof HTMLInputElement && /^(submit|button|reset)$/.test(el.type) && el.value) return el.value;
-    if (el.id) {
-      const forLabel = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      const t = clean(forLabel?.textContent);
-      if (t) return t;
-    }
-    const wrap = clean(el.closest("label")?.textContent);
-    if (wrap) return wrap;
-    const ph = clean((el as HTMLInputElement).placeholder);
-    if (ph) return ph;
-    // Last resort for unlabelled form controls: the name/id attribute. Sites
-    // like autoplius use descriptive names (make_date_from, price_to) that tell
-    // the agent exactly what the control is — essential for driving forms.
-    const attr = clean(el.getAttribute("name") || el.id);
-    if (attr) return attr;
-  }
-  // 4. images
-  if (el instanceof HTMLImageElement && clean(el.alt)) return clean(el.alt);
-  // 5. title attribute
-  const title = clean(el.getAttribute("title"));
-  if (title) return title;
-  // 6. buttons/links/headings: their own visible text (capped)
-  const role = roleOf(el);
-  if (role === "button" || role === "link" || role === "heading" || role === "option" || role === "tab") {
-    return clean(el.textContent).slice(0, 120);
-  }
-  return "";
-}
-
-// ── State (compact) ──────────────────────────────────────────────────────────
-// value → `="Vilnius"`, boolean states → `*expanded` `*disabled` `*current`.
-function stateOf(el: Element): string {
-  const parts: string[] = [];
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-    const isBtn = el instanceof HTMLInputElement && /^(submit|button|reset)$/.test(el.type);
-    const v = clean(el.value);
-    if (v && !isBtn) parts.push(`=${JSON.stringify(v.slice(0, 80))}`); // btn value is already the name
-    if (el.disabled) parts.push("*disabled");
-  }
-  for (const a of ["aria-expanded", "aria-selected", "aria-checked", "aria-current"]) {
-    const v = el.getAttribute(a);
-    if (v && v !== "false") parts.push(`*${a.replace("aria-", "")}${v === "true" ? "" : "=" + v}`);
-  }
-  return parts.length ? " " + parts.join(" ") : "";
-}
-
-/** Actionable = worth a ref (click/fill targets). Text/containers get no ref. */
-function isInteractive(el: Element, role: string): boolean {
-  return INTERACTIVE_ROLES.has(role) || el.hasAttribute("onclick") || el.getAttribute("tabindex") === "0";
-}
-
-// ── Visibility ───────────────────────────────────────────────────────────────
-function isVisible(el: Element): boolean {
-  if (el.getAttribute("aria-hidden") === "true") return false;
-  const style = getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden") return false;
-  const rect = el.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0 && el.childElementCount === 0) return false;
-  return true;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// classify() — THE salience policy. This single function decides, for every
-// element, whether it becomes a line in the snapshot ("emit"), is dropped along
-// with its whole subtree ("skip-subtree"), or is treated as a transparent
-// wrapper we descend through without emitting ("transparent").
-//
-//   ── This is the highest-leverage knob in the whole project. ──
-//   Too inclusive  → bloated snapshots, wasted tokens, Claude distracted by chrome.
-//   Too exclusive  → we miss the booking price / the "Select" button / the field.
-//
-// The default below keeps interactive + structural roles, drops scripts/hidden,
-// and collapses anonymous wrapper divs. Tune the heuristics here as you learn
-// what real booking pages need (e.g. emit elements with data-testid, treat
-// price-like text specially, keep [tabindex]/[onclick] divs, ...).
-// ─────────────────────────────────────────────────────────────────────────────
-type Decision = "emit" | "skip-subtree" | "transparent";
-
-function classify(el: Element, role: string): Decision {
-  if (SKIP_TAGS.has(el.tagName)) return "skip-subtree";
-  if (el.getAttribute("aria-hidden") === "true") return "skip-subtree";
-  if (role === "presentation" || role === "none") return "transparent";
-  if (INTERACTIVE_ROLES.has(role) || STRUCTURAL_ROLES.has(role)) return "emit";
-  // Custom interactive widgets that lack a role but behave like controls:
-  if (el.hasAttribute("onclick") || el.getAttribute("tabindex") === "0") return "emit";
-  return "transparent";
-}
-
-// ── Pruning filters (Phase 2) ─────────────────────────────────────────────────
-// A filter is CSS-selectors-in-JSON that removes chrome (footer/nav/legal) during
-// the walk, so the snapshot ships only meaningful content. Auto-picked by URL.
-interface Filter {
-  name: string;
-  match: string;        // URL glob, e.g. "godaddy.com/*/domainsearch/*"
-  root?: string;        // CSS selector to start the walk at (keep only this subtree)
-  drop?: string[];      // CSS selectors whose subtrees are removed
-  dropText?: string[];  // regex/substring; matching text nodes are removed
-  // Extraction mode: emit one positional row per `item`, reading each field's
-  // text from a selector relative to the item. Reads real DOM nodes (no prose
-  // re-parsing, no truncation). When present, overrides the prune/walk output.
-  extract?: { item: string; fields: { name: string; sel?: string }[] };
-}
-
-function safeMatches(el: Element, sel: string): boolean {
-  try { return el.matches(sel); } catch { return false; }
-}
-
-function globToRegex(glob: string): RegExp {
-  const esc = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(esc);
-}
-
-/** Pick the filter whose URL glob matches; longest `match` wins. */
-function pickFilter(filters: Filter[], href: string): Filter | null {
-  const u = href.replace(/^[a-z]+:\/\//i, "");
-  let best: Filter | null = null;
-  for (const f of filters) {
-    if (f.match && globToRegex(f.match).test(u) && (!best || f.match.length > best.match.length)) best = f;
-  }
-  return best;
-}
-
-function textMatcher(pat: string): (t: string) => boolean {
-  try { const re = new RegExp(pat, "i"); return (t) => re.test(t); }
-  catch { const low = pat.toLowerCase(); return (t) => t.toLowerCase().includes(low); }
-}
-
-// ── The walker ───────────────────────────────────────────────────────────────
-interface SnapshotResult {
-  url: string;
-  count: number;
-  tree: string;
-  applied: string | null;                      // name of the filter that ran (if any)
-  rootApplied?: string | null;                 // filter.root selector that scoped the walk
-  dropped: { subtrees: number; textLines: number };
-  rootMissing?: boolean;                       // filter.root selector matched nothing
-  extracted?: boolean;                         // positional extraction was used
-}
-
-// Extraction mode: one positional row per item, fields read from DOM nodes.
-// `[id] v1;v2;…` with a leading legend line. Items get refs so click/open still work.
-function extractRows(filter: Filter, root: ParentNode): { tree: string; count: number } {
-  const ex = filter.extract!;
-  const items = Array.from(root.querySelectorAll(ex.item)).filter((el) => isVisible(el));
-  const legend = `# ${filter.name} | ${items.length} items | id;${ex.fields.map((f) => f.name).join(";")}`;
-  const lines = [legend];
-  let ref = 0;
-  for (const item of items) {
-    const id = ++ref;
-    refMap.set(id, item);
-    const vals = ex.fields.map((f) => {
-      const el = f.sel ? item.querySelector(f.sel) : item;
-      return clean(el?.textContent).replace(/;/g, ","); // guard the delimiter
-    });
-    lines.push(`[${id}] ${vals.join(";")}`);
-  }
-  return { tree: lines.join("\n"), count: ref };
-}
-
-// Compact format to minimise tokens:
-//   • only ACTIONABLE elements get a `[ref]` (click/fill targets)
-//   • bare `"quoted"` lines are page text — no ref, no "text" keyword
-//   • indentation = DOM nesting
-//   • interactiveOnly mode drops all text → just the actionable refs
-//   • a matching pruning filter removes chrome (root/drop/dropText) during the walk
-function snapshot(opts: { interactiveOnly?: boolean; filters?: Filter[] } = {}): SnapshotResult {
-  refMap = new Map();
-  let ref = 0;
-  const lines: string[] = [];
-  const interactiveOnly = !!opts.interactiveOnly;
-
-  const filter = pickFilter(opts.filters ?? [], location.href);
-  const dropSel = filter?.drop ?? [];
-  const dropText = (filter?.dropText ?? []).map(textMatcher);
-  let droppedSubtrees = 0;
-  let droppedText = 0;
-
-  let rootNode: Element = document.body;
-  let rootMissing = false;
-  if (filter?.root) {
-    const r = document.querySelector(filter.root);
-    if (r) rootNode = r; else rootMissing = true;
-  }
-
-  // Extraction mode: positional rows from DOM fields. Falls through to the
-  // normal walk if it finds zero items (selector stale / wrong page variant).
-  if (filter?.extract) {
-    const res = extractRows(filter, rootNode);
-    if (res.count > 0) {
-      return {
-        url: location.href, count: res.count, tree: res.tree,
-        applied: filter.name, rootApplied: filter.root ?? null,
-        dropped: { subtrees: 0, textLines: 0 }, rootMissing, extracted: true,
-      };
-    }
-  }
-
-  const walk = (node: Node, depth: number) => {
-    for (const child of Array.from(node.childNodes)) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        if (interactiveOnly) continue;
-        const t = clean(child.textContent);
-        if (!t) continue;
-        if (dropText.some((m) => m(t))) { droppedText++; continue; }
-        lines.push(`${"  ".repeat(depth)}${JSON.stringify(t.slice(0, 200))}`);
-        continue;
-      }
-      if (child.nodeType !== Node.ELEMENT_NODE) continue;
-      const el = child as Element;
-      if (!isVisible(el)) continue;
-      if (dropSel.length && dropSel.some((sel) => safeMatches(el, sel))) { droppedSubtrees++; continue; }
-      const role = roleOf(el);
-      const decision = classify(el, role);
-      if (decision === "skip-subtree") continue;
-      if (decision !== "emit") {
-        walk(el, depth); // transparent wrapper — descend without a line
-        continue;
-      }
-      const interactive = isInteractive(el, role);
-      if (interactiveOnly && !interactive) {
-        walk(el, depth); // skip the line but keep hunting for actionable descendants
-        continue;
-      }
-      const name = accessibleName(el);
-      let line = "  ".repeat(depth);
-      if (interactive) {
-        const id = ++ref;
-        refMap.set(id, el);
-        line += `[${id}] `;
-      }
-      line += (role || el.tagName.toLowerCase()) + (name ? ` "${name}"` : "") + stateOf(el);
-      lines.push(line);
-      // Skip children when the name already encodes the content (leaf-like).
-      if (!(NAME_IS_CONTENT.has(role) && name)) walk(el, depth + 1);
-    }
-  };
-
-  walk(rootNode, 0);
-  return {
-    url: location.href,
-    count: ref,
-    tree: lines.join("\n"),
-    applied: filter?.name ?? null,
-    rootApplied: filter?.root && !rootMissing ? filter.root : null,
-    dropped: { subtrees: droppedSubtrees, textLines: droppedText },
-    rootMissing,
-  };
-}
+import {
+  snapshot, collectLinks, getRef, clean, isVisible,
+  type Filter,
+} from "./snapshot";
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 function resolve(ref: number): Element {
-  const el = refMap.get(ref);
+  const el = getRef(ref);
   if (!el || !el.isConnected) {
     throw new Error(`No live element for ref ${ref}. The page changed — call browser_snapshot again.`);
   }
@@ -403,13 +81,12 @@ function doRead(ref: number) {
 }
 
 // Escape hatch: raw HTML when the a11y snapshot flattens away needed detail.
-// Scope to a `ref` (just that element's subtree) to keep it cheap; `clean`
-// strips script/style/svg/etc. Capped so we never dump a megabyte at Claude.
-function doHtml(ref: number | undefined, clean = true, up = 0, offset = 0, maxBytes = 50_000) {
+// Scope to a `ref` (just that element's subtree) to keep it cheap.
+function doHtml(ref: number | undefined, stripNoise = true, up = 0, offset = 0, maxBytes = 50_000) {
   let el = (ref != null ? resolve(ref) : document.documentElement) as HTMLElement;
-  for (let i = 0; i < up && el.parentElement; i++) el = el.parentElement; // climb to a container (e.g. the result card)
+  for (let i = 0; i < up && el.parentElement; i++) el = el.parentElement; // climb to a container
   let html: string;
-  if (clean) {
+  if (stripNoise) {
     const clone = el.cloneNode(true) as HTMLElement;
     clone.querySelectorAll("script,style,noscript,svg,link,template,iframe").forEach((n) => n.remove());
     html = clone.outerHTML;
@@ -429,8 +106,7 @@ function doHtml(ref: number | undefined, clean = true, up = 0, offset = 0, maxBy
 }
 
 // Dispatch a key to a ref (or the focused element) — e.g. Enter to commit an
-// autocomplete, ArrowDown to move a highlight. Synthetic but with key/code/keyCode
-// set so most sites' handlers fire.
+// autocomplete, ArrowDown to move a highlight.
 const KEYS: Record<string, string> = {
   Enter: "Enter", Tab: "Tab", Escape: "Escape", Backspace: "Backspace",
   ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
@@ -551,7 +227,21 @@ function toast(msg: string) {
 // ── Bridge message handler (relayed by the background service worker) ─────────
 function handleOp(op: string, params: any): unknown {
   switch (op) {
-    case "snapshot": return snapshot({ interactiveOnly: params?.interactiveOnly, filters: params?.filters });
+    case "snapshot":
+      return snapshot(document, {
+        interactiveOnly: params?.interactiveOnly,
+        filters: params?.filters as Filter[] | undefined,
+        // `raw` turns off every reduction pass, not just the saved filters.
+        chrome: params?.chrome,
+        collapse: params?.collapse,
+        dedup: params?.dedup,
+      });
+    case "links": {
+      const root = params?.ref != null ? (resolve(params.ref) as Element) : undefined;
+      const r = collectLinks(document, { root, limit: params?.limit });
+      // Report whether the scoped element is still the one we were given.
+      return { ...r, scoped: params?.ref != null };
+    }
     case "click": return doClick(params.ref);
     case "fill": return doFill(params.ref, params.value);
     case "select": return doSelect(params.ref, params.value);
@@ -563,6 +253,9 @@ function handleOp(op: string, params: any): unknown {
     default: throw new Error(`Unknown op '${op}'`);
   }
 }
+
+// Re-exported so the bundle keeps the symbol even if a future op needs it.
+void isVisible;
 
 browser.runtime.onMessage.addListener(
   (msg: any, _sender: unknown, sendResponse: (r: unknown) => void) => {

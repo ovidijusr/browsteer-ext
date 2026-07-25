@@ -103,28 +103,87 @@ drive that browser).
 
 ## The one knob that matters
 
-`classify()` in `extension/src/content.ts` decides what becomes a snapshot line.
+`classify()` in `extension/src/snapshot.ts` decides what becomes a snapshot line.
 It is the salience policy — the lever between "too noisy / too many tokens" and
 "missed the price / the button". Tune it as you learn what real booking pages need.
+
+## Reduction passes
+
+Beyond the a11y reduction, three structural passes run on every snapshot. Each is
+reported in the response header (`Reduced: collapsed 30, deduped 19, chrome 2`)
+and all three are switched off by `raw: true`.
+
+| Pass | What it does | Why |
+|------|--------------|-----|
+| **collapse** | Runs of 5+ childless look-alike sibling controls become one ranged line, `[13-43] button "Weiter 1…Weiter 31" ×31 collapsed`. Every ref in the range is still individually clickable. | A 31-photo gallery shipped 31 refs of zero information on every listing page. |
+| **dedup** | A subtree repeated verbatim later on the page becomes `↩ identical to an earlier block (14 lines omitted, refs [92-96] still clickable)`. | autoplius renders its whole financing calculator twice, byte-identical. |
+| **chrome** | Drops `footer`/`[role=contentinfo]`, Google-Maps widgets (`.gm-style`), and consent containers addressed by their own well-known ids. | ~20 refs of legal links and map zoom controls per page. |
+
+**The asymmetry that shapes the design:** over-collapsing a gallery costs
+nothing; silently dropping the block that held the one number you needed costs a
+wrong answer nobody detects. So structural collapsing is automatic and universal,
+while anything semantic stays explicit — hence no fuzzy class matching in the
+chrome list, a length cap on collapsible names (result cards digit-normalise to
+the same skeleton as `"Weiter 1"`, and folding *them* would hide 20 distinct
+cars — see the regression test), and refs preserved on every elided block.
+
+## Getting off a list page cheaply
+
+Extraction filters append an implicit `url` column, with the shared head and tail
+of the hrefs hoisted into the legend once:
+
+```
+# mobile-de-srp | 20 items | id;title;price;specs;url
+# url = "https://suchen.mobile.de/fahrzeuge/details.html?id=" + <url> + "&con=USED&…&vc=Car"
+[1] M50 M Sport Pro AHK Laser HUD;46.940 €;EZ 05/2023 • 67.675 km;453073528
+```
+
+`browser_links` does the same for an arbitrary page or subtree. Both exist to
+kill the old four-call detour to reach one result: *snapshot → browser_html(ref)
+→ parse the href out of truncated HTML → navigate*.
+
+## Tab targeting
+
+The first op that reaches a tab **auto-pins** to it and says so, so a later call
+can't quietly answer about whatever the user happened to focus. If an unpinned
+read does land somewhere else, the hub returns an **error instead of the
+payload** — being told in one line beats paying for a few thousand tokens of the
+wrong document. `browser_pin` with no `tabId` opts out for the session.
 
 ## Files
 
 | Path | Role |
 |------|------|
 | `bridge/index.ts` | WS server + MCP server (`browser_pair` + snapshot/click/fill/read) + keyed registry |
-| `bridge/db.ts` | `bun:sqlite` action log + filters (`~/.browsteer/browsteer.db`) |
-| `extension/src/content.ts` | a11y snapshot + click/fill/read |
+| `bridge/db.ts` | `bun:sqlite` action log + filters (`~/.browsteer/browsteer.db`, `BROWSTEER_DB_DIR` overrides) |
+| `extension/src/snapshot.ts` | snapshot core — pure DOM-in/string-out, unit-tested under happy-dom |
+| `extension/src/content.ts` | actions (click/fill/read/press), element picker, message plumbing |
 | `extension/src/background.ts` | WS client, key registration, relays ops to the active tab |
 | `extension/src/popup.ts` | shows the pairing key + copies `/browse <key>` |
 | `scripts/dev.ts` | bundler watch + `web-ext run` |
 | `test/mcp-client.ts` | self-contained E2E: spawns bridge → Firefox → drives the fixture |
 | `~/.claude/skills/browse/SKILL.md` | the `/browse` slash command |
 
-## Test end-to-end
+## Tests
+
+```sh
+bun test                    # 30 unit + integration tests, no browser needed
+bun run reduction           # before/after bytes+tokens for the reduction passes
+```
+
+`test/snapshot.test.ts` drives the snapshot core under happy-dom against
+`test/fixtures.ts` — structural replicas of a mobile.de detail page and results
+list, carrying the element counts observed in real use (31 gallery thumbs, a
+duplicated financing block, 12 map controls, 10 footer links). `test/hub.test.ts`
+exercises auto-pin and the drift refusal against a fake extension socket, so the
+targeting logic is covered without launching Firefox.
+
+With a real browser:
 
 ```sh
 bun run test/serve.ts &     # booking-like fixture on :8080
 bun run test/mcp-client.ts  # spawns bridge, launches Firefox, snapshots + acts
+bun run test/measure.ts     # snapshot vs raw DOM on your CURRENT active tab
 ```
 
 ## Inspect the action log

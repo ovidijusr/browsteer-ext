@@ -17,13 +17,29 @@ const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
 const CALL_TIMEOUT_MS = 15_000;
 
 // Per-controller (per Claude session) state — pairings/pins don't leak across sessions.
-interface Controller { activeKey: string | null; pinnedTabId: number | null; lastUrl: string | null }
+interface Controller {
+  activeKey: string | null;
+  pinnedTabId: number | null;
+  lastUrl: string | null;
+  autoPinned: boolean;      // we pinned it, the caller didn't
+  noAutoPin: boolean;       // caller explicitly unpinned — don't re-pin behind their back
+  lastOpMayNavigate: boolean; // the previous op could legitimately change the URL
+}
 type SockData = { role: "extension" | "control" | null; key: string | null; ctl: Controller | null };
 type Sock = ServerWebSocket<SockData>;
 
 const browsers = new Map<string, Sock>(); // key → extension socket
 const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 let seq = 0;
+
+function newController(): Controller {
+  return { activeKey: null, pinnedTabId: null, lastUrl: null, autoPinned: false, noAutoPin: false, lastOpMayNavigate: false };
+}
+
+// Ops that can legitimately change the URL — drift after one of these is expected.
+const MAY_NAVIGATE = new Set(["navigate", "click", "press", "fill", "select"]);
+// Ops whose payload is big enough that answering about the wrong page is a real cost.
+const HEAVY_READ = new Set(["snapshot", "html", "links"]);
 
 function noteUrl(ctl: Controller, url?: string): string {
   if (!url) return "";
@@ -34,6 +50,30 @@ function noteUrl(ctl: Controller, url?: string): string {
   }
   ctl.lastUrl = url;
   return warn;
+}
+
+// Lock onto whichever tab served the first op, so a later call can't quietly
+// answer about a tab the user happened to focus in the meantime.
+function maybeAutoPin(ctl: Controller, tabId?: number): string {
+  if (tabId == null || ctl.pinnedTabId != null || ctl.noAutoPin) return "";
+  ctl.pinnedTabId = tabId;
+  ctl.autoPinned = true;
+  return `\nℹ auto-pinned to tab ${tabId} so later calls can't drift to another tab` +
+    ` (browser_pin with no tabId to follow focus instead).`;
+}
+
+// The payload is already in hand here, but it is about a page nobody asked for.
+// Returning an error instead of the tree is the whole point: the caller pays a
+// line, not a few thousand tokens of the wrong document.
+function driftRefusal(ctl: Controller, op: string, url: string | undefined, prevMayNavigate: boolean): string | null {
+  if (!url || !HEAVY_READ.has(op)) return null;
+  if (ctl.pinnedTabId != null) return null;      // caller owns the target explicitly
+  if (!ctl.lastUrl || url === ctl.lastUrl) return null;
+  if (prevMayNavigate) return null;              // we caused this change
+  return `Refusing to return the ${op}: the target tab is not the page you were working on.\n` +
+    `  was: ${ctl.lastUrl}\n  now: ${url}\n` +
+    `Browser focus moved, so this payload would describe a page you did not ask for and it has NOT been sent. ` +
+    `Re-target on purpose: browser_tabs → browser_pin({tabId}) for the page you want, then retry.`;
 }
 
 function targetSocket(ctl: Controller): Sock {
@@ -67,6 +107,10 @@ const fail = (text: string): Res => ({ text, isError: true });
 // The op bodies — identical behavior to the old per-tool MCP handlers, but with
 // per-controller state and returning {text,isError} instead of MCP content.
 async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
+  // Read the previous op's intent before overwriting it — drift is only
+  // suspicious when the op *before* this one couldn't have caused it.
+  const prevMayNavigate = ctl.lastOpMayNavigate;
+  ctl.lastOpMayNavigate = MAY_NAVIGATE.has(op);
   switch (op) {
     case "pair": {
       if (!browsers.has(p.key)) {
@@ -81,36 +125,71 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
     case "snapshot": {
       try {
         const filters = p.raw ? [] : listFilters();
-        const r = await callExtension(ctl, "snapshot", { interactiveOnly: p.interactiveOnly ?? false, filters });
+        // `raw` means genuinely unprocessed: no saved filter AND no reduction passes.
+        const r = await callExtension(ctl, "snapshot", {
+          interactiveOnly: p.interactiveOnly ?? false, filters,
+          chrome: !p.raw, collapse: !p.raw, dedup: !p.raw,
+        });
+        const refuse = driftRefusal(ctl, "snapshot", r.url, prevMayNavigate);
+        if (refuse) { logAction({ tab_url: r.url, tool: "snapshot", ok: false, error: "drift refused" }); return fail(refuse); }
         logAction({ tab_url: r.url, tool: "snapshot", ok: true, element_count: r.count });
         let header = `URL: ${r.url}\nActionable: ${r.count}`;
+        const saved: string[] = [];
+        if (r.collapsed) saved.push(`collapsed ${r.collapsed}`);
+        if (r.deduped) saved.push(`deduped ${r.deduped}`);
+        if (r.chrome) saved.push(`chrome ${r.chrome} region${r.chrome === 1 ? "" : "s"}`);
+        if (saved.length) header += `\nReduced: ${saved.join(", ")} — pass raw:true for the unreduced page`;
         if (r.applied && r.extracted) header += `\nFilter: ${r.applied} (extraction — ${r.count} rows; legend on first line) — pass raw:true to bypass`;
         else if (r.applied) {
           const scope = r.rootApplied ? `scoped to '${r.rootApplied}', ` : "";
           header += `\nFilter: ${r.applied} (${scope}hid ${r.dropped.subtrees} regions, ${r.dropped.textLines} text lines) — pass raw:true to bypass`;
           if (r.rootMissing) header += `\n⚠ filter root selector matched nothing; showing whole page`;
         }
+        header += maybeAutoPin(ctl, r.tabId);
         header += noteUrl(ctl, r.url);
         return ok(`${header}\n\n${r.tree}`);
       } catch (e: any) { logAction({ tool: "snapshot", ok: false, error: e.message }); return fail(e.message); }
     }
-    case "click": try { const r = await callExtension(ctl, "click", { ref: p.ref }); logAction({ tab_url: r?.url, tool: "click", ref: p.ref, ok: true }); return ok(`Clicked [${p.ref}]. Re-snapshot to see the result.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "click", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
+    case "links": {
+      try {
+        const r = await callExtension(ctl, "links", { ref: p.ref, limit: p.limit ?? 200 });
+        const refuse = driftRefusal(ctl, "links", r.url, prevMayNavigate);
+        if (refuse) return fail(refuse);
+        logAction({ tab_url: r.url, tool: "links", ref: p.ref ?? null, ok: true, element_count: r.links.length });
+        let header = `URL: ${r.url}\nLinks: ${r.links.length}${r.total > r.links.length ? ` of ${r.total} (raise limit for more)` : ""}`;
+        if (r.scoped) header += ` — scoped to [${p.ref}]`;
+        if (r.prefix || r.suffix) header += `\nurl = ${JSON.stringify(r.prefix)} + <url> + ${JSON.stringify(r.suffix)}`;
+        header += maybeAutoPin(ctl, r.tabId);
+        header += noteUrl(ctl, r.url);
+        const body = r.links.map((l: any) => `${l.text} ⇢ ${l.url}`).join("\n");
+        return ok(`${header}\n\n${body || "no links found"}`);
+      } catch (e: any) { logAction({ tool: "links", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
+    }
+    case "click": try { const r = await callExtension(ctl, "click", { ref: p.ref }); logAction({ tab_url: r?.url, tool: "click", ref: p.ref, ok: true }); return ok(`Clicked [${p.ref}]. Re-snapshot to see the result.${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "click", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
     case "fill": try { const r = await callExtension(ctl, "fill", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: true }); return ok(`Filled [${p.ref}] with ${JSON.stringify(p.value)}.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "select": try { const r = await callExtension(ctl, "select", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "select", ref: p.ref, value: p.value, ok: true }); return ok(`Selected "${r.selected}" in [${p.ref}].${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "select", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "options": try { const r = await callExtension(ctl, "options", { ref: p.ref }); logAction({ tool: "options", ref: p.ref, ok: true }); return ok(r.options.join("\n")); } catch (e: any) { return fail(e.message); }
     case "read": try { const r = await callExtension(ctl, "read", { ref: p.ref }); logAction({ tab_url: r?.url, tool: "read", ref: p.ref, ok: true }); return ok(r.text ?? ""); } catch (e: any) { logAction({ tool: "read", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
-    case "navigate": try { await callExtension(ctl, "navigate", { url: p.url }); ctl.lastUrl = p.url; logAction({ tab_url: p.url, tool: "navigate", ok: true }); return ok(`Navigated to ${p.url}. Re-snapshot to see the page.`); } catch (e: any) { logAction({ tool: "navigate", ok: false, error: e.message }); return fail(e.message); }
+    case "navigate": try { const r = await callExtension(ctl, "navigate", { url: p.url }); ctl.lastUrl = p.url; logAction({ tab_url: p.url, tool: "navigate", ok: true }); return ok(`Navigated to ${p.url}. Re-snapshot to see the page.${maybeAutoPin(ctl, r?.tabId)}`); } catch (e: any) { logAction({ tool: "navigate", ok: false, error: e.message }); return fail(e.message); }
     case "html": try {
       const r = await callExtension(ctl, "html", { ref: p.ref, clean: p.clean ?? true, up: p.up ?? 0, offset: p.offset ?? 0, maxBytes: p.maxBytes ?? 50_000 });
+      const refuse = driftRefusal(ctl, "html", r?.url, prevMayNavigate);
+      if (refuse) { logAction({ tab_url: r?.url, tool: "html", ok: false, error: "drift refused" }); return fail(refuse); }
       logAction({ tab_url: r?.url, tool: "html", ref: p.ref ?? null, ok: true });
       let header = `bytes ${r.offset}–${r.offset + r.returned} of ${r.total}`;
+      header += maybeAutoPin(ctl, r?.tabId);
       if (r.truncated) header = `⚠ TRUNCATED — returned bytes ${r.offset}–${r.offset + r.returned} of ${r.total} total. This is NOT the whole element — page more with offset:${r.offset + r.returned}, or (better for list pages) use browser_snapshot / an extraction filter instead of raw HTML.\n` + header;
       return ok(`${header}${noteUrl(ctl, r?.url)}\n\n${r.html}`);
     } catch (e: any) { logAction({ tool: "html", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
     case "tabs": try { const r = await callExtension(ctl, "tabs"); const txt = r.tabs.map((t: any) => `[${t.tabId}]${t.active ? " *active" : ""}  ${t.title ?? ""}\n      ${t.url ?? ""}`).join("\n"); return ok(txt || "no tabs"); } catch (e: any) { return fail(e.message); }
     case "pin":
-      if (p.tabId == null) { ctl.pinnedTabId = null; return ok("Unpinned — actions follow the active tab."); }
-      ctl.pinnedTabId = p.tabId; ctl.lastUrl = null; return ok(`Pinned to tab ${p.tabId}. Actions target it regardless of focus.`);
+      if (p.tabId == null) {
+        // Explicit unpin is a decision — don't quietly auto-pin again afterwards.
+        ctl.pinnedTabId = null; ctl.autoPinned = false; ctl.noAutoPin = true; ctl.lastUrl = null;
+        return ok("Unpinned — actions follow the active tab, and auto-pinning stays off for this session.");
+      }
+      ctl.pinnedTabId = p.tabId; ctl.autoPinned = false; ctl.noAutoPin = false; ctl.lastUrl = null;
+      return ok(`Pinned to tab ${p.tabId}. Actions target it regardless of focus.`);
     case "press": try { const r = await callExtension(ctl, "press", { key: p.key, ref: p.ref }); logAction({ tab_url: r?.url, tool: "press", value: p.key, ref: p.ref ?? null, ok: true }); return ok(`Pressed ${p.key}.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "press", value: p.key, ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
     case "pick": try {
       const r = await callExtension(ctl, "pick", {}, 120_000);
@@ -140,7 +219,7 @@ if (process.argv.includes("--stop")) {
           let msg: any; try { msg = JSON.parse(String(raw)); } catch { return; }
           if (msg.type === "shutdown") { console.error("[hub] shutdown requested"); process.exit(0); }
           if (msg.type === "register" && typeof msg.key === "string") { ws.data.role = "extension"; ws.data.key = msg.key; browsers.set(msg.key, ws); console.error(`[hub] browser registered: ${msg.key}`); return; }
-          if (msg.type === "hello" && msg.role === "control") { ws.data.role = "control"; ws.data.ctl = { activeKey: null, pinnedTabId: null, lastUrl: null }; console.error("[hub] controller connected"); return; }
+          if (msg.type === "hello" && msg.role === "control") { ws.data.role = "control"; ws.data.ctl = newController(); console.error("[hub] controller connected"); return; }
           if (ws.data.role === "extension") { const pr = pending.get(msg.id); if (!pr) return; clearTimeout(pr.timer); pending.delete(msg.id); if (msg.ok) pr.resolve(msg.result); else pr.reject(new Error(msg.error ?? "unknown extension error")); return; }
           if (ws.data.role === "control" && typeof msg.op === "string") { execOp(ws.data.ctl!, msg.op, msg.params ?? {}).then((r) => { try { ws.send(JSON.stringify({ id: msg.id, ok: !r.isError, text: r.text })); } catch {} }); return; }
         },
