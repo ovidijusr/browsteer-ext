@@ -140,3 +140,64 @@ describe("state slimming", () => {
     expect(candKey({ role: "link", name: "X" })).not.toBe(candKey({ role: "button", name: "X" }));
   });
 });
+
+import { lexicalMatch, buildState } from "../bridge/jev";
+import { normTarget } from "../bridge/db";
+describe("lexical fast path", () => {
+  const cands = parseCandidates(`URL: x
+  [2] button "Libraries17"
+  [3] button "Playlists42"
+  [21] button "Meme songs69"
+  [47] textbox "Search all music..."
+  [49] button "Settings"
+  [68] button "Meme songs69 tracks"`);
+  test("target that spells the element's name resolves without Jev", () => {
+    expect(lexicalMatch("the Playlists section tab", cands)?.ref).toBe(3);
+    expect(lexicalMatch("open the Libraries tab", cands)?.ref).toBe(2);
+  });
+  test("only the row whose whole name is spelled matches; a longer sibling name does not compete", () => {
+    expect(lexicalMatch("open the Meme songs playlist", cands)?.ref).toBe(21); // "Meme songs69 tracks" is not contained in the target
+  });
+  test("two distinct elements with the same spelled name → ambiguous → null", () => {
+    const two = parseCandidates('  [1] button "Settings"\n  [2] link "Settings"');
+    expect(lexicalMatch("open Settings", two)).toBeNull();
+  });
+  test("relational or descriptive targets go to the model", () => {
+    expect(lexicalMatch("the button next to Settings", cands)).toBeNull();
+    expect(lexicalMatch("the search box", cands)).toBeNull(); // name is "search all music...", not contained
+    expect(lexicalMatch("not the Settings button", cands)).toBeNull();
+  });
+  test("short names never match (\"Go\", \"OK\")", () => {
+    expect(lexicalMatch("press go", parseCandidates('  [1] button "Go"'))).toBeNull();
+  });
+});
+
+describe("buildState keeps page text in place, slims controls", () => {
+  const tree = `URL: x
+  heading "Playlists"
+    [1] button "New playlist"
+    "42 playlists"
+    [2] button "New playlist"
+    [3] button "${"x".repeat(200)}"`;
+  test("dedupes controls, keeps text between them, caps names", () => {
+    const { tree: t, cands, deduped } = buildState({ url: "x", tree });
+    expect(deduped).toBe(1);
+    expect(cands.map((c) => c.ref)).toEqual([1, 3]);
+    const lines = t.split("\n");
+    expect(lines[1]).toBe('  heading "Playlists"');
+    expect(lines[3]).toBe('  "42 playlists"');
+    expect(lines[4].length).toBeLessThan(120);
+  });
+  test("excluded role+name keys leave both state and candidates", () => {
+    const { cands } = buildState({ url: "x", tree, exclude: new Set([candKey({ role: "button", name: "New playlist" })]) });
+    expect(cands.map((c) => c.ref)).toEqual([3]);
+  });
+});
+
+describe("memo target key", () => {
+  test("filler words dropped, role words kept", () => {
+    expect(normTarget("Open the Playlists tab.")).toBe("playlists tab");
+    expect(normTarget("the playlists tab")).toBe("playlists tab");
+    expect(normTarget("the search box")).not.toBe(normTarget("the search button"));
+  });
+});

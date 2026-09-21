@@ -11,7 +11,7 @@
 //
 // All logging goes to STDERR (stdout is unused here, but keep the habit).
 import { logAction, upsertFilter, listFilters, deleteFilter, getMemo, saveMemo, bumpMemo, clearMemos, listMemos, pruneMemos, type Memo } from "./db";
-import { THRESHOLDS, MEMO, findTarget, findMany, findToward, guardClick, needsGuard, warm, formatShortlist, pct, parseCandidates, memoMatch, candKey, type Ranked, type Candidate, type FindResult } from "./jev";
+import { THRESHOLDS, MEMO, findTarget, findMany, guardClick, needsGuard, warm, formatShortlist, pct, parseCandidates, memoMatch, lexicalMatch, candKey, type Ranked, type Candidate, type FindResult } from "./jev";
 import type { ServerWebSocket } from "bun";
 
 const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
@@ -127,24 +127,29 @@ async function maybeGuard(cand: Ranked, goal: string, url: string): Promise<{ g:
 // QUIET_MS after at least MIN_MS, or the cap. A poll that fails means the
 // document is unloading (full navigation): keep polling until the new document
 // answers or the cap hits.
-const QUIET_MS = 150, MIN_MS = 80, POLL_MS = 60;
+// Settle rule (v2): wait until the page has REACTED (URL changed or first DOM
+// mutation), then only QUIET_MS of silence. Before, a fixed 80 ms floor plus
+// 150 ms quiet made 270–600 ms per hop the largest chunk of a pursue. A page
+// that never reacts (dead click) still returns at NOREACT_MS.
+const QUIET_MS = 60, POLL_MS = 40, NOREACT_MS = 500;
 async function settledClick(ctl: Controller, ref: number, maxMs = 1500): Promise<any> {
   const r = await callExtension(ctl, "click", { ref });
   ctl.lastOpMayNavigate = true;
   if (!r?.pulse) { await Bun.sleep(600); return { ...r, settled: { settledMs: 600, urlChanged: false, unloading: false, fallback: true } }; } // old content script
   const t0 = performance.now(); const startUrl = r.url;
-  let last = r.mutations as number, lastChange = t0, unloading = false, url = startUrl;
+  let last = r.mutations as number, lastChange = 0, unloading = false, url = startUrl, reacted = false;
   while (performance.now() - t0 < maxMs) {
     await Bun.sleep(POLL_MS);
     let pl: any;
     try { pl = await callExtension(ctl, "pulse", {}, 1500); } catch { unloading = true; continue; }
     url = pl.url;
-    if (url !== startUrl && !unloading) break;              // SPA route change → reacted
+    if (url !== startUrl && !unloading) break;              // SPA route change → reacted, done
     if (unloading && pl.ready !== "loading") break;         // new document is up
-    if (pl.mutations !== last) { last = pl.mutations; lastChange = performance.now(); continue; }
-    if (performance.now() - lastChange >= QUIET_MS && performance.now() - t0 >= MIN_MS) break;
+    if (pl.mutations !== last) { last = pl.mutations; lastChange = performance.now(); reacted = true; continue; }
+    if (reacted && performance.now() - lastChange >= QUIET_MS) break;
+    if (!reacted && performance.now() - t0 >= NOREACT_MS) break;
   }
-  return { url, settled: { settledMs: Math.round(performance.now() - t0), urlChanged: url !== startUrl, unloading } };
+  return { url, settled: { settledMs: Math.round(performance.now() - t0), urlChanged: url !== startUrl, unloading, reacted } };
 }
 const fmtSettle = (r: any) => r?.settled ? ` settled ${r.settled.settledMs} ms${r.settled.unloading ? ", full navigation" : r.settled.urlChanged ? ", URL changed" : ""}` : "";
 async function hrefOf(ctl: Controller, cand: Ranked): Promise<string> {
@@ -294,10 +299,10 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
       const ms: Record<string, number> = {};
       const timed = async <T,>(k: string, f: () => Promise<T>): Promise<T> => { const t = performance.now(); try { return await f(); } finally { ms[k] = Math.round((ms[k] ?? 0) + performance.now() - t); } };
       try {
-        // Interactive-only state first (half the tokens → half the latency); one
-        // retry with page text when nothing matched, since some targets are
-        // described by nearby text rather than the control's own name.
-        let snap = await timed("snapshot", () => jevSnapshot(ctl, false));
+        // Page text is included from the start: Jev latency is flat in state size
+        // (measured), so the old slim-then-retry-with-text dance only cost a round
+        // trip on every miss. buildState() slims the tree in place.
+        let snap = await timed("snapshot", () => jevSnapshot(ctl, true));
         const refuse = driftRefusal(ctl, "snapshot", snap.url, prevMayNavigate);
         if (refuse) { logAction({ tab_url: snap.url, tool: "find", value: targets.join(" | "), ok: false, error: "drift refused" }); return fail(refuse); }
 
@@ -305,21 +310,19 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         // is matched by role + name against the fresh candidates, no Jev call.
         const cands = parseCandidates(snap.tree);
         const memoHits = new Map<number, { memo: Memo; cand: Candidate }>();
+        const lexHits = new Map<number, Candidate>();
         if (!fresh) targets.forEach((t, i) => {
-          const memo = getMemo(snap.url, t); if (!memo) return;
-          const cand = memoMatch(memo, cands); if (cand) memoHits.set(i, { memo, cand });
+          const memo = getMemo(snap.url, t);
+          const cand = memo ? memoMatch(memo, cands) : null;
+          if (memo && cand) { memoHits.set(i, { memo, cand }); return; }
+          // Lexical: the target spells out the element's name (rules in jev.ts).
+          const lex = lexicalMatch(t, cands); if (lex) lexHits.set(i, lex);
         });
-        const askJev = targets.filter((_, i) => !memoHits.has(i));
+        const askJev = targets.filter((_, i) => !memoHits.has(i) && !lexHits.has(i));
         let results: FindResult[] = [];
-        let retried = false;
+        const retried = false;
         if (askJev.length) {
-          results = await timed("jev", () => findMany({ targets: askJev, url: snap.url, title: snap.title, tree: snap.tree }));
-          if (results.every((r) => r.exists < THRESHOLDS.exists)) {
-            snap = await timed("snapshot", () => jevSnapshot(ctl, true));
-            const again = await timed("jev", () => findMany({ targets: askJev, url: snap.url, title: snap.title, tree: snap.tree }));
-            again[0].inputTokens += results[0].inputTokens; again[0].requests += results[0].requests;
-            results = again; retried = true;
-          }
+          results = await timed("jev", () => findMany({ targets: askJev, url: snap.url, title: snap.title, tree: snap.tree, hint: targets.length === 1 }));
           // Teach the memo store from confident verdicts only (thresholds in jev.ts MEMO).
           for (const r of results) {
             const top = r.ranked[0];
@@ -328,46 +331,45 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         }
         // Merge back in `targets` order; memo hits look like a certain Jev answer.
         const jevByTarget = new Map(results.map((r) => [r.target, r]));
-        const merged: (FindResult & { memo?: Memo })[] = targets.map((t, i) => {
-          const h = memoHits.get(i);
-          if (!h) return jevByTarget.get(t)!;
-          bumpMemo(h.memo.id);
-          return { target: t, exists: 1, confidence: 1, ranked: [{ ref: h.cand.ref, p: 1, role: h.cand.role, name: h.cand.name }], candidates: cands.length, deduped: 0, model: "memo", inputTokens: 0, requests: 0, memo: h.memo };
+        const merged: (FindResult & { memo?: Memo; lexical?: boolean })[] = targets.map((t, i) => {
+          const h = memoHits.get(i); const lx = lexHits.get(i);
+          if (h) { bumpMemo(h.memo.id); return { target: t, exists: 1, confidence: 1, ranked: [{ ref: h.cand.ref, p: 1, role: h.cand.role, name: h.cand.name }], candidates: cands.length, deduped: 0, model: "memo", inputTokens: 0, requests: 0, memo: h.memo }; }
+          if (lx) return { target: t, exists: 1, confidence: 1, ranked: [{ ref: lx.ref, p: 1, role: lx.role, name: lx.name }], candidates: cands.length, deduped: 0, model: "lexical", inputTokens: 0, requests: 0, lexical: true };
+          return jevByTarget.get(t)!;
         });
         const first = results[0];
-        const tok = first?.inputTokens ?? 0, reqs = first?.requests ?? 0, model = first?.model ?? "memo";
+        const tok = first?.inputTokens ?? 0, reqs = first?.requests ?? 0, model = first?.model ?? (memoHits.size ? "memo" : "lexical");
         const memoNote = memoHits.size ? `, ${memoHits.size} from memo (${[...memoHits.values()].map((h) => `hits ${h.memo.hits + 1}`).join(", ")}; pass fresh:true to re-ask Jev)` : "";
+        const lexNote = lexHits.size ? `, ${lexHits.size} lexical (target names the element; fresh:true to ask Jev)` : "";
         const dedupNote = first?.deduped ? `, ${first.deduped} duplicate controls folded` : "";
-        let header = `URL: ${snap.url}\nJev: ${cands.length} candidates, ${reqs} request${reqs === 1 ? "" : "s"}, ${tok} tok (${model})${retried ? ", retried with page text" : ""}${dedupNote}${memoNote}`;
+        let header = `URL: ${snap.url}\nJev: ${cands.length} candidates, ${reqs} request${reqs === 1 ? "" : "s"}, ${tok} tok (${model})${retried ? ", retried with page text" : ""}${dedupNote}${memoNote}${lexNote}`;
         header += maybeAutoPin(ctl, snap.tabId) + noteUrl(ctl, snap.url);
-        const detail: any = { targets, results: merged.map((r) => ({ target: r.target, exists: r.exists, confidence: r.confidence, top: r.ranked.slice(0, 3), memo: r.memo ? r.memo.id : undefined })), tokens: tok, requests: reqs, model, retried, deduped: first?.deduped ?? 0, memoHits: memoHits.size, ms };
+        const detail: any = { targets, results: merged.map((r) => ({ target: r.target, exists: r.exists, confidence: r.confidence, top: r.ranked.slice(0, 3), memo: r.memo ? r.memo.id : undefined, lexical: r.lexical })), tokens: tok, requests: reqs, model, retried, deduped: first?.deduped ?? 0, memoHits: memoHits.size, lexHits: lexHits.size, ms };
 
         if (targets.length > 1) {
           const blocks = merged.map((r) => r.exists < THRESHOLDS.exists
             ? `${JSON.stringify(r.target)}: nothing matches (exists ${pct(r.exists)}); closest ${r.ranked[0] ? `[${r.ranked[0].ref}] ${JSON.stringify(r.ranked[0].name)} ${pct(r.ranked[0].p)}` : "—"}`
-            : `${JSON.stringify(r.target)} → [${r.ranked[0].ref}] ${r.ranked[0].role} ${JSON.stringify(r.ranked[0].name)}  ${pct(r.ranked[0].p)}, conf ${r.confidence.toFixed(2)}${r.memo ? "  (memo)" : ""}${r.ranked[1] ? `  (then [${r.ranked[1].ref}] ${pct(r.ranked[1].p)})` : ""}`);
+            : `${JSON.stringify(r.target)} → [${r.ranked[0].ref}] ${r.ranked[0].role} ${JSON.stringify(r.ranked[0].name)}  ${pct(r.ranked[0].p)}, conf ${r.confidence.toFixed(2)}${r.memo ? "  (memo)" : r.lexical ? "  (lexical)" : ""}${r.ranked[1] ? `  (then [${r.ranked[1].ref}] ${pct(r.ranked[1].p)})` : ""}`);
           logAction({ tab_url: snap.url, tool: "find", value: targets.join(" | "), ok: true, element_count: cands.length, detail: { ...detail, outcome: "multi" } });
           return ok(`${header}\n${blocks.join("\n")}\nAct with browser_click / browser_fill on those refs (same snapshot, refs are live until the DOM changes).`);
         }
 
         const r = merged[0]; const target = r.target; const top = r.ranked[0];
         if (!top || r.exists < THRESHOLDS.exists) {
-          // The target is not here — ask once which element leads toward it, so the
-          // caller gets a next hop instead of a dead end (≈ one pursue step, no click).
+          // The target is not here — the "closest hop" was asked in the same request
+          // (FindResult.toward), so the caller gets a next step at no extra round trip.
           let hop = "";
-          try {
-            const tw = await timed("jev", () => findToward({ target, url: snap.url, title: snap.title, tree: snap.tree }));
-            if (tw?.ranked[0]) {
-              detail.toward = { top: tw.ranked, confidence: tw.confidence }; detail.tokens = (detail.tokens ?? 0) + tw.inputTokens;
-              const h = tw.ranked[0];
-              const href = await hrefOf(ctl, h);
-              hop = `\nClosest hop toward it (confidence ${tw.confidence.toFixed(2)}):\n${formatShortlist(tw.ranked)}${href ? `\n  → ${href}` : ""}\nbrowser_click({ref:${h.ref}}) then browser_find again, or browser_pursue({goal}) to let the bridge walk there.`;
-            }
-          } catch {}
+          const tw = r.toward;
+          if (tw?.ranked[0]) {
+            detail.toward = { top: tw.ranked, confidence: tw.confidence };
+            const h = tw.ranked[0];
+            const href = await hrefOf(ctl, h);
+            hop = `\nClosest hop toward it (confidence ${tw.confidence.toFixed(2)}):\n${formatShortlist(tw.ranked)}${href ? `\n  → ${href}` : ""}\nbrowser_click({ref:${h.ref}}) then browser_find again, or browser_pursue({goal}) to let the bridge walk there.`;
+          }
           logAction({ tab_url: snap.url, tool: "find", value: target, ok: false, error: "no match", element_count: r.candidates, detail: { ...detail, outcome: "no-match" } });
           return fail(`${header}\nNothing on this page matches ${JSON.stringify(target)} (exists ${pct(r.exists)}). Closest guesses:\n${formatShortlist(r.ranked)}${hop}${hop ? "" : "\nUse browser_snapshot to look yourself, or rephrase the target."}`);
         }
-        header += `\nexists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)}${r.memo ? " (memo)" : ""}`;
+        header += `\nexists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)}${r.memo ? " (memo)" : r.lexical ? " (lexical)" : ""}`;
         const [href] = await Promise.all([hrefOf(ctl, top)]);
         const hrefLine = href ? `\n  → ${href}   (browser_navigate here to skip the click)` : "";
         if (act === "none") {
@@ -393,6 +395,46 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: asked ? g : "skipped", outcome: "clicked", settled: c?.settled } });
         return ok(`${header}\nClicked [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}${asked ? `, guard ${pct(g)}` : ""}).${fmtSettle(c)}${noteUrl(ctl, c?.url)}\nRunner-ups: ${r.ranked.slice(1, 3).map((x) => `[${x.ref}] ${JSON.stringify(x.name)} ${pct(x.p)}`).join(", ") || "none"}. browser_find again for the next step.`);
       } catch (e: any) { logAction({ tool: "find", value: targets.join(" | "), ok: false, error: e.message, detail: { ms } }); return fail(e.message); }
+    }
+    // ── Scripted sequence: several find/fill/press/navigate/pursue steps in ONE
+    // tool call. Each step is an ordinary op; the summary is one line per step.
+    // Stops at the first failed or refused step unless `continue` is set; refs are
+    // never part of a script (they die on every navigation), steps name targets.
+    case "do": {
+      const steps: any[] = Array.isArray(p.steps) ? p.steps : [];
+      if (!steps.length || steps.length > 20) return fail("do: pass `steps` (1–20), e.g. [{find:'the email field', fill:'a@b.c'}, {find:'sign in', click:true}, {pursue:'the invoices page'}].");
+      const lines: string[] = [];
+      const t0 = performance.now();
+      let lastUrl = ctl.lastUrl ?? "?"; let stoppedAt: number | null = null;
+      for (let i = 0; i < steps.length; i++) {
+        const st = steps[i];
+        let op: string, params: any, label: string;
+        if (typeof st.find === "string") {
+          op = "find"; label = `find ${JSON.stringify(st.find)}`;
+          params = { target: st.find, act: typeof st.fill === "string" ? "fill" : st.click ? "click" : "none", value: st.fill, fresh: st.fresh };
+          if (params.act === "none") params.act = "click"; // in a script a bare find means "click it"
+          label += params.act === "fill" ? ` ← ${JSON.stringify(st.fill)}` : " → click";
+        } else if (typeof st.press === "string") { op = "press"; params = { key: st.press }; label = `press ${st.press}`; }
+        else if (typeof st.navigate === "string") { op = "navigate"; params = { url: st.navigate }; label = `navigate ${st.navigate}`; }
+        else if (typeof st.pursue === "string") { op = "pursue"; params = { goal: st.pursue, maxSteps: st.maxSteps }; label = `pursue ${JSON.stringify(st.pursue)}`; }
+        else if (typeof st.wait === "number") { await Bun.sleep(Math.min(st.wait, 5000)); lines.push(`${i + 1}. wait ${st.wait} ms`); continue; }
+        else return fail(`do: step ${i + 1} has no verb (find/press/navigate/pursue/wait): ${JSON.stringify(st)}`);
+        const ts = performance.now();
+        const r = await execOp(ctl, op, params);
+        const ms = Math.round(performance.now() - ts);
+        const first = r.text.split("\n").find((l) => /^(Clicked|Filled|Goal reached|Stuck|Stopped|Refusing|Not acting|Nothing|Navigated|Pressed|Looping|Step limit)/.test(l)) ?? r.text.split("\n")[0];
+        const urlLine = r.text.match(/^URL: (\S+)/m)?.[1]; if (urlLine) lastUrl = urlLine;
+        const bad = r.isError || /^(Refusing|Not acting|Nothing|Stuck|Stopped|Looping|Step limit)/.test(first);
+        lines.push(`${i + 1}. ${label} — ${first} (${ms} ms)`);
+        if (bad && !p.continue) { stoppedAt = i + 1; lines.push(`   ↳ stopped here; full reply:\n${r.text.split("\n").map((l) => "     " + l).join("\n")}`); break; }
+      }
+      let tail = "";
+      if (p.finalSnapshot !== false && stoppedAt == null) {
+        try { const sn = await callExtension(ctl, "snapshot", { interactiveOnly: true, filters: listFilters(), chrome: true, collapse: true, dedup: true }); lastUrl = sn.url; tail = `\n\nFinal page (interactive only, ${sn.count} refs):\n${sn.tree}`; } catch {}
+      }
+      const total = Math.round(performance.now() - t0);
+      logAction({ tab_url: lastUrl, tool: "do", value: steps.map((x) => x.find ?? x.press ?? x.navigate ?? x.pursue ?? "wait").join(" | "), ok: stoppedAt == null, element_count: steps.length, detail: { steps, lines, stoppedAt, ms: total } });
+      return (stoppedAt == null ? ok : fail)(`${stoppedAt == null ? `Done: ${steps.length} step${steps.length === 1 ? "" : "s"}` : `Stopped at step ${stoppedAt} of ${steps.length}`} in ${total} ms\nURL: ${lastUrl}\n${lines.join("\n")}${tail}`);
     }
     case "memos": {
       // Inspect / forget the Jev-bypass memos. clear: true (all) or a host string.
@@ -489,6 +531,9 @@ if (process.argv.includes("--stop")) {
     });
     console.error(`[hub] listening on ws://127.0.0.1:${WS_PORT}`);
     warm().then(() => console.error("[hub] jev connection warm")); // first find should not pay the TLS handshake
+    // Idle connections go cold in well under a minute (first request after a pause:
+    // 650–850 ms vs 270 warm). One cheap ping every 25 s while a browser is attached.
+    setInterval(() => { if (browsers.size) warm(); }, 25_000);
     { const n = pruneMemos(MEMO.ttlDays * 86_400_000); if (n) console.error(`[hub] pruned ${n} stale memo(s)`); }
   } catch {
     console.error(`[hub] port ${WS_PORT} busy — another hub is running; exiting.`);

@@ -275,6 +275,32 @@ tool("browser_find", {
   },
 });
 
+tool("browser_do", {
+  title: "Run a scripted sequence of steps in one call",
+  description:
+    "Several browser steps in ONE tool call (each Claude turn costs seconds; each step here costs ~0.3 s): " +
+    "a list of {find, click|fill}, {press}, {navigate}, {pursue}, {wait} steps run hub-side with settle waits between, " +
+    "returning one line per step plus the final page. Steps name targets, never refs. A bare {find} clicks; " +
+    "{find, fill:'text'} types; {press:'Enter'}; {navigate:'https://…'}; {pursue:'goal'} walks multi-hop. " +
+    "Stops at the first failed/refused/low-confidence step (its full reply is included) unless continue:true. " +
+    "Example: [{find:'the email field', fill:'a@b.c'}, {find:'the password field', fill:'…'}, {find:'the sign in button'}, {pursue:'the invoices page'}].",
+  inputSchema: {
+    steps: z.array(z.object({
+      find: z.string().optional().describe("Target to find; clicks it unless `fill` is given"),
+      fill: z.string().optional().describe("Text to type into the found target"),
+      click: z.boolean().optional().describe("Explicit click (default for a bare find)"),
+      fresh: z.boolean().optional().describe("Bypass memo/lexical for this find"),
+      press: z.string().optional().describe("Key to dispatch to the focused element, e.g. 'Enter'"),
+      navigate: z.string().optional().describe("URL to load"),
+      pursue: z.string().optional().describe("Multi-hop goal (click-only)"),
+      maxSteps: z.number().int().min(1).max(12).optional(),
+      wait: z.number().optional().describe("Sleep ms (max 5000) — for pages that animate after a click"),
+    })).min(1).max(20),
+    continue: z.boolean().optional().describe("Keep going after a failed step (default: stop and report)"),
+    finalSnapshot: z.boolean().optional().describe("Append the final page (default true)"),
+  },
+});
+
 tool("browser_memos", {
   title: "List or forget target memos",
   description:

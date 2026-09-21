@@ -63,6 +63,30 @@ export function memoMatch(memo: { role: string; name: string }, cands: Candidate
   return distinct.size === 1 ? hits[0] : null;
 }
 
+// ── Lexical fast path: the target names the element outright ────────────────
+// "the Playlists section tab" → button "Playlists42"; 7 of the 12 distinct
+// targets in the first day's log were of this shape. Zero latency, zero tokens.
+// Conservative on purpose: whole-word containment of the candidate's normalized
+// name (≥ LEX_MIN_CHARS) inside the normalized target, exactly ONE distinct
+// element may match, and the target may not describe a relation ("next to",
+// "below", "not") — those need the model. Anything else falls through to Jev.
+export const LEX_MIN_CHARS = 4;
+const RELATIONAL_RE = /\b(next to|near|beside|below|above|under|after|before|inside|within|except|not|other than|instead|second|third|last|first|nearest|closest|šalia|po|virš|ne|kitas|antras)\b/i;
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function lexicalMatch(target: string, cands: Candidate[]): Candidate | null {
+  const t = target.toLowerCase().replace(/\s+/g, " ");
+  if (RELATIONAL_RE.test(t)) return null;
+  const hits = new Map<string, Candidate>();
+  for (const c of cands) {
+    const n = normName(c.name);
+    if (n.length < LEX_MIN_CHARS || !/[a-z\u00C0-\u024F]/i.test(n)) continue;
+    if (!new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(n)}([^\\p{L}\\p{N}]|$)`, "iu").test(t)) continue;
+    const k = candKey(c); if (!hits.has(k)) hits.set(k, c);
+    if (hits.size > 1) return null;
+  }
+  return hits.size === 1 ? [...hits.values()][0] : null;
+}
+
 // Warm the TLS connection at hub start so the first find is not the slow one.
 export async function warm(): Promise<void> {
   try { await client().models.list(); } catch {}
@@ -216,6 +240,7 @@ export interface FindResult {
   reached?: number;          // pursue only
   blocked?: number;          // pursue only
   willReach?: number;        // pursue only
+  toward?: { ranked: Ranked[]; confidence: number }; // hint only: the element that leads toward the target
   candidates: number;
   deduped: number;           // exact-duplicate controls removed from the state
   model: string;
@@ -228,7 +253,7 @@ export interface FindResult {
 // on this very page (as role+name keys from `candKey`, since refs are reassigned
 // per snapshot) — they leave the option list so a loop cannot re-pick them.
 export const candKey = (c: { role: string; name: string }) => `${c.role}\u0000${c.name}`;
-interface Common { url: string; title?: string; tree: string; pursue?: boolean; history?: string; exclude?: Set<string> }
+interface Common { url: string; title?: string; tree: string; pursue?: boolean; history?: string; exclude?: Set<string>; hint?: boolean }
 export interface FindInput extends Common { target: string }
 export interface FindManyInput extends Common { targets: string[] }
 
@@ -239,14 +264,30 @@ export async function findTarget(inp: FindInput): Promise<FindResult> {
 // The state Jev sees. Interactive-only trees are rebuilt slim (deduped, flat,
 // capped names); trees with page text are kept as-is (minus dedup is not
 // possible without losing the text's position) and only trimmed to budget.
-function buildState(inp: Common): { tree: string; cands: Candidate[]; deduped: number } {
+export function buildState(inp: Common): { tree: string; cands: Candidate[]; deduped: number } {
   const raw = trimState(inp.tree);
-  const all = parseCandidates(raw).filter((c) => !inp.exclude?.has(candKey(c)));
-  const hasText = /^\s*"/m.test(raw);
-  if (hasText) return { tree: raw, cands: all, deduped: 0 };
-  const { kept, dropped } = dedupeCandidates(all);
-  return { tree: slimTree(kept), cands: kept, deduped: dropped };
+  const seen = new Set<string>();
+  const cands: Candidate[] = [];
+  const out: string[] = [];
+  let deduped = 0;
+  for (const line of raw.split("\n")) {
+    const m = CAND_RE.exec(line);
+    if (!m) {
+      // Page text / headings: kept in place (targets are often described by
+      // nearby text), whitespace flattened, capped like names.
+      const t = line.trim();
+      if (t) out.push("  " + (t.length > TEXT_CAP ? t.slice(0, TEXT_CAP - 1) + "…" : t));
+      continue;
+    }
+    const c: Candidate = { ref: Number(m[1]), role: m[2], name: m[3].replace(/\s+=.*$/, "").replace(/^"(.*)"$/, "$1"), line: line.trim() };
+    if (inp.exclude?.has(candKey(c))) continue;
+    const k = candKey(c);
+    if (seen.has(k)) { deduped++; continue; }
+    seen.add(k); cands.push(c); out.push(slimTree([c]));
+  }
+  return { tree: out.join("\n"), cands, deduped };
 }
+export const TEXT_CAP = 120;
 
 // Several targets against ONE snapshot in ONE request (speculative fan-out):
 // every target gets its own Choice(+batches) and exists Noul; the page-level
@@ -269,6 +310,10 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
     const goal = inp.targets[0];
     questions.reached = Q.reached(goal); questions.blocked = Q.blocked(); questions.willReach = Q.willReach(goal);
   }
+  // Speculative: latency is flat in question count (measured 240–330 ms for 1 or 5
+  // questions), so the "closest hop" is asked up front and only READ on a miss —
+  // a miss costs one request instead of three.
+  if (inp.hint) inp.targets.forEach((t, ti) => { questions[`toward_${ti}`] = Q.toward(t, batches[0]); });
 
   const r1 = await client().systemOne({ state, questions });
   let inputTokens = r1.usage.input_tokens;
@@ -309,6 +354,7 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
       reached: inp.pursue ? A.reached.noul : undefined,
       blocked: inp.pursue ? A.blocked.noul : undefined,
       willReach: inp.pursue ? A.willReach.noul : undefined,
+      toward: inp.hint && A[`toward_${ti}`] ? { ranked: toRanked(A[`toward_${ti}`].probabilities).slice(0, 3), confidence: A[`toward_${ti}`].confidence } : undefined,
       candidates: cands.length,
       deduped,
       model: r1.model,
@@ -316,23 +362,6 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
       requests: ti === 0 ? requests : 0,
     };
   });
-}
-
-// After a miss: one Choice over the same (slim) state asking which element
-// leads TOWARD the target. Returned as a hint; the hub never clicks it itself.
-export interface Toward { ranked: Ranked[]; confidence: number; inputTokens: number }
-export async function findToward(inp: FindInput): Promise<Toward | null> {
-  const { tree, cands } = buildState(inp);
-  if (!cands.length) return null;
-  const batch = cands.slice(0, CHOICE_MAX); // a hint does not warrant the two-pass dance
-  const byRef = new Map(batch.map((c) => [c.ref, c]));
-  const state: Record<string, string> = { url: inp.url, title: inp.title ?? "", page: tree };
-  const r = await client().systemOne({ state, questions: { toward: Q.toward(inp.target, batch) } });
-  const a = r.answers.toward as any;
-  const ranked: Ranked[] = Object.entries(a.probabilities as Record<string, number>)
-    .map(([ref, p]) => ({ ref: Number(ref), p, role: byRef.get(Number(ref))?.role ?? "?", name: byRef.get(Number(ref))?.name ?? "" }))
-    .sort((x, y) => y.p - x.p).slice(0, 3);
-  return { ranked, confidence: a.confidence, inputTokens: r.usage.input_tokens };
 }
 
 // Tiny second request: only the chosen element's line plus the goal, so the

@@ -139,9 +139,12 @@ db.exec(`
 
 export interface Memo { id: number; host: string; target: string; role: string; name: string; hits: number; created_at: number; last_hit: number }
 
-/** Lowercase, single-spaced, no trailing punctuation — so "The Playlists tab." and "the playlists tab" share a memo. */
+/** Lowercase, single-spaced, no trailing punctuation, filler dropped — so "Open the Playlists tab." and
+ *  "playlists tab" share a memo. Role words (tab/button/box/field/link) are KEPT: "search box" and
+ *  "search button" are different elements. */
+const FILLER_RE = /\b(the|a|an|to|of|on|in|into|open|click|go|please|then|and|now|me|it|that|this|for|with|at|pressed|hit|press|tap)\b/g;
 export function normTarget(t: string): string {
-  return t.toLowerCase().replace(/\s+/g, " ").replace(/[\s.!?,;:]+$/g, "").trim();
+  return t.toLowerCase().replace(FILLER_RE, " ").replace(/\s+/g, " ").replace(/[\s.!?,;:]+$/g, "").trim();
 }
 export function hostOf(url: string): string {
   try { return new URL(url).host; } catch { return url; }
