@@ -51,3 +51,20 @@ test("thresholds are ordered sensibly", () => {
   expect(THRESHOLDS.guard).toBeLessThan(THRESHOLDS.exists);
   expect(THRESHOLDS.reached).toBeGreaterThan(THRESHOLDS.blocked);
 });
+
+import { needsGuard, RISK_RE } from "../bridge/jev";
+describe("needsGuard lexicon", () => {
+  test("plain links and named navigation buttons skip the guard", () => {
+    expect(needsGuard({ role: "link", name: "BMW i4 eDrive40, 2023" })).toBe(false);
+    expect(needsGuard({ role: "button", name: "Libraries17" })).toBe(false);
+    expect(needsGuard({ role: "button", name: "Nightcore42" })).toBe(false);
+  });
+  test("commitment words in any language and nameless controls are guarded", () => {
+    expect(needsGuard({ role: "button", name: "Buy now" })).toBe(true);
+    expect(needsGuard({ role: "link", name: "Delete account" })).toBe(true);
+    expect(needsGuard({ role: "button", name: "Apmokėti" })).toBe(true);
+    expect(needsGuard({ role: "button", name: "Ištrinti" })).toBe(true);
+    expect(needsGuard({ role: "button", name: "" })).toBe(true);
+    expect(RISK_RE.test("Siųsti žinutę")).toBe(true);
+  });
+});

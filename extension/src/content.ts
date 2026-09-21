@@ -21,11 +21,44 @@ function resolve(ref: number): Element {
   return el;
 }
 
-function doClick(ref: number) {
+// Resolve when the page has reacted to an action: the URL changed, the DOM has
+// been quiet for QUIET_MS, the document is unloading (full navigation — the
+// content script dies with it, so answer before that), or maxMs elapsed.
+// Replaces fixed sleeps in the hub: SPAs settle in ~100–300 ms, not 1.2 s.
+const QUIET_MS = 150;
+function settle(maxMs: number, startUrl: string): Promise<{ settledMs: number; urlChanged: boolean; unloading: boolean }> {
+  return new Promise((res) => {
+    const t0 = performance.now();
+    let mutated = false, done = false;
+    const finish = (unloading = false) => {
+      if (done) return; done = true;
+      obs.disconnect(); clearInterval(tick); clearTimeout(cap);
+      window.removeEventListener("pagehide", onHide);
+      res({ settledMs: Math.round(performance.now() - t0), urlChanged: location.href !== startUrl, unloading });
+    };
+    const onHide = () => finish(true);
+    window.addEventListener("pagehide", onHide);
+    const obs = new MutationObserver(() => { mutated = true; });
+    obs.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    let quietSince = performance.now();
+    const tick = setInterval(() => {
+      if (mutated) { mutated = false; quietSince = performance.now(); return; }
+      // Require at least one quiet window after some activity or after 100 ms grace,
+      // so an instantly-quiet page still returns quickly.
+      if (performance.now() - quietSince >= QUIET_MS && performance.now() - t0 >= 100) finish();
+    }, 25);
+    const cap = setTimeout(() => finish(), maxMs);
+  });
+}
+
+async function doClick(ref: number, settleMs?: number) {
   const el = resolve(ref) as HTMLElement;
   el.scrollIntoView({ block: "center" });
+  const startUrl = location.href;
+  const wait = settleMs ? settle(settleMs, startUrl) : null;
   el.click();
-  return { url: location.href };
+  const settled = wait ? await wait : undefined;
+  return { url: location.href, settled };
 }
 
 function doFill(ref: number, value: string) {
@@ -243,7 +276,7 @@ function handleOp(op: string, params: any): unknown {
       return { ...r, scoped: params?.ref != null };
     }
     case "href": { const el = resolve(params.ref) as Element; return { url: location.href, href: absoluteHref(el, location.href) }; }
-    case "click": return doClick(params.ref);
+    case "click": return doClick(params.ref, params.settle);
     case "fill": return doFill(params.ref, params.value);
     case "select": return doSelect(params.ref, params.value);
     case "options": return doOptions(params.ref);

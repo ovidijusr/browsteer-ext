@@ -109,7 +109,7 @@ tool("browser_links", {
 tool("browser_click", {
   title: "Click element",
   description: "Click the element with the given [ref] from the latest snapshot.",
-  inputSchema: { ref: z.number().int().describe("Element ref from browser_snapshot") },
+  inputSchema: { ref: z.number().int().describe("Element ref from browser_snapshot"), settle: z.number().int().min(0).max(5000).optional().describe("Max ms to wait for the page to react (URL change / DOM quiet / unload) before returning; default 800, 0 = return immediately") },
 });
 
 tool("browser_fill", {
@@ -256,7 +256,7 @@ tool("browser_save_filter", {
 });
 
 tool("browser_find", {
-  title: "Find (and optionally click) an element by describing it",
+  title: "Find (and optionally click/fill) elements by describing them",
   description:
     "Jev-powered targeting: describe the element in plain language and the bridge picks the matching [ref] " +
     "from a fresh snapshot for you — you get a 5-line shortlist instead of the whole tree. Prefer this over " +
@@ -267,24 +267,27 @@ tool("browser_find", {
     "Not for numeric/date comparisons ('cheapest', 'newest'): use an extraction filter and sort yourself. " +
     "Still needs browser_snapshot when the page is unfamiliar or the result says nothing matched.",
   inputSchema: {
-    target: z.string().describe("What to find, as a user would say it, e.g. 'the Weiter / next page control'"),
-    act: z.enum(["none", "click"]).optional().describe("'click' = click the top match if confident (default 'none' = just return the shortlist)"),
+    target: z.string().optional().describe("What to find, as a user would say it, e.g. 'the Weiter / next page control'"),
+    targets: z.array(z.string()).min(2).max(8).optional().describe("Several targets answered in ONE request (e.g. ['email field','password field','sign in button']); returns one ref per target, no act"),
+    act: z.enum(["none", "click", "fill"]).optional().describe("'click' = click the top match if confident; 'fill' = type `value` into it (default 'none' = shortlist only). Single target only."),
+    value: z.string().optional().describe("Text to type when act is 'fill'"),
   },
 });
 
 tool("browser_pursue", {
   title: "Let Jev browse toward a goal (click-only, bounded)",
   description:
-    "Multi-page navigation without a Claude turn per hop: the bridge snapshots, asks Jev which element leads " +
+    "Multi-page navigation without a Claude turn per hop (~1 s per hop): the bridge snapshots, asks Jev which element leads " +
     "toward the goal, clicks it, and repeats (default 6 steps, max 12) until Jev judges the goal is on screen, " +
     "the page needs a human (login/CAPTCHA/consent), no step is confident, or the next click looks irreversible. " +
-    "It NEVER types, selects, or presses keys — use browser_fill/browser_select for forms and searches, then " +
-    "pursue from the results. Returns the trail of clicks and a compact snapshot of the final page. " +
+    "It NEVER types, selects, or presses keys — use browser_find({target, act:'fill', value}) or browser_fill for forms, then " +
+    "pursue from the results. Returns the trail of clicks (with timings); finalSnapshot:true adds the final page. " +
     "Good goals name a destination: 'open the first BMW i4 listing', 'get to the invoices page', 'open the " +
     "documentation for the Python SDK'.",
   inputSchema: {
     goal: z.string().describe("Destination or outcome to reach, as a user would phrase it"),
     maxSteps: z.number().int().min(1).max(12).optional().describe("Click budget (default 6)"),
+    finalSnapshot: z.boolean().optional().describe("Also return an interactive-only snapshot of the final page (default false — call browser_find/browser_snapshot yourself when needed)"),
   },
 });
 

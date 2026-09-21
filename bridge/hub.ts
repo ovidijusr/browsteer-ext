@@ -11,7 +11,7 @@
 //
 // All logging goes to STDERR (stdout is unused here, but keep the habit).
 import { logAction, upsertFilter, listFilters, deleteFilter } from "./db";
-import { THRESHOLDS, findTarget, guardClick, formatShortlist, pct, type Ranked } from "./jev";
+import { THRESHOLDS, findTarget, findMany, guardClick, needsGuard, warm, formatShortlist, pct, type Ranked } from "./jev";
 import type { ServerWebSocket } from "bun";
 
 const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
@@ -105,17 +105,31 @@ function callExtension(ctl: Controller, op: string, params: Record<string, unkno
 // Uncollapsed so every repeated control keeps its own ref and name; text nodes
 // kept because targets are often described by nearby text. Retries briefly:
 // right after a click the content script may not be injected yet.
-async function jevSnapshot(ctl: Controller): Promise<any> {
+async function jevSnapshot(ctl: Controller, withText: boolean): Promise<any> {
   let lastErr: any;
   for (let i = 0; i < 4; i++) {
     try {
-      const r = await callExtension(ctl, "snapshot", { interactiveOnly: false, filters: listFilters(), chrome: true, collapse: false, dedup: true });
+      const r = await callExtension(ctl, "snapshot", { interactiveOnly: !withText, filters: listFilters(), chrome: true, collapse: false, dedup: true });
       logAction({ tab_url: r.url, tool: "snapshot", ok: true, element_count: r.count, value: "jev" });
       return r;
     } catch (e) { lastErr = e; await Bun.sleep(700); }
   }
   throw lastErr;
 }
+// Guard only when the name smells like a commitment; otherwise 0 without a round trip.
+async function maybeGuard(cand: Ranked, goal: string, url: string): Promise<{ g: number; asked: boolean }> {
+  if (!needsGuard(cand)) return { g: 0, asked: false };
+  return { g: await guardClick(cand, goal, url), asked: true };
+}
+// Click and wait for the page to react (URL change / DOM quiet / unload), capped.
+async function settledClick(ctl: Controller, ref: number, maxMs = 1500): Promise<any> {
+  const r = await callExtension(ctl, "click", { ref, settle: maxMs });
+  ctl.lastOpMayNavigate = true;
+  // Old content script (not reloaded yet) knows no `settle`: fall back to a short fixed wait.
+  if (!r?.settled) { await Bun.sleep(600); return { ...r, settled: { settledMs: 600, urlChanged: false, unloading: false, fallback: true } }; }
+  return r;
+}
+const fmtSettle = (r: any) => r?.settled ? ` settled ${r.settled.settledMs} ms${r.settled.unloading ? ", full navigation" : r.settled.urlChanged ? ", URL changed" : ""}` : "";
 async function hrefOf(ctl: Controller, cand: Ranked): Promise<string> {
   if (cand.role !== "link") return "";
   try { const r = await callExtension(ctl, "href", { ref: cand.ref }); return r?.href ?? ""; } catch { return ""; }
@@ -147,9 +161,10 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
       try {
         const filters = p.raw ? [] : listFilters();
         // `raw` means genuinely unprocessed: no saved filter AND no reduction passes.
+        // Per-pass overrides are for diagnosis/benchmarks; `raw` remains the documented all-off switch.
         const r = await callExtension(ctl, "snapshot", {
-          interactiveOnly: p.interactiveOnly ?? false, filters,
-          chrome: !p.raw, collapse: !p.raw, dedup: !p.raw,
+          interactiveOnly: p.interactiveOnly ?? false, filters: p.filters === false ? [] : filters,
+          chrome: p.chrome ?? !p.raw, collapse: p.collapse ?? !p.raw, dedup: p.dedup ?? !p.raw,
         });
         const refuse = driftRefusal(ctl, "snapshot", r.url, prevMayNavigate);
         if (refuse) { logAction({ tab_url: r.url, tool: "snapshot", ok: false, error: "drift refused" }); return fail(refuse); }
@@ -186,7 +201,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         return ok(`${header}\n\n${body || "no links found"}`);
       } catch (e: any) { logAction({ tool: "links", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
     }
-    case "click": try { const r = await callExtension(ctl, "click", { ref: p.ref }); logAction({ tab_url: r?.url, tool: "click", ref: p.ref, ok: true }); return ok(`Clicked [${p.ref}]. Re-snapshot to see the result.${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "click", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
+    case "click": try { const r = await callExtension(ctl, "click", { ref: p.ref, settle: p.settle ?? 800 }); logAction({ tab_url: r?.url, tool: "click", ref: p.ref, ok: true }); return ok(`Clicked [${p.ref}].${fmtSettle(r)} Re-snapshot to see the result.${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "click", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
     case "fill": try { const r = await callExtension(ctl, "fill", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: true }); return ok(`Filled [${p.ref}] with ${JSON.stringify(p.value)}.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "select": try { const r = await callExtension(ctl, "select", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "select", ref: p.ref, value: p.value, ok: true }); return ok(`Selected "${r.selected}" in [${p.ref}].${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "select", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "options": try { const r = await callExtension(ctl, "options", { ref: p.ref }); logAction({ tool: "options", ref: p.ref, ok: true }); return ok(r.options.join("\n")); } catch (e: any) { return fail(e.message); }
@@ -253,74 +268,111 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
 
     // ── Jev-powered targeting (bridge/jev.ts holds the questions + thresholds) ──
     case "find": {
-      const target = String(p.target ?? "").trim();
-      if (!target) return fail("find: `target` is required (plain-language description of the element).");
+      const targets: string[] = Array.isArray(p.targets) ? p.targets.map(String).map((s: string) => s.trim()).filter(Boolean) : p.target ? [String(p.target).trim()] : [];
+      if (!targets.length) return fail("find: pass `target` (one description) or `targets` (several, answered in one request).");
+      const act: string = p.act ?? "none";
+      if (act !== "none" && targets.length > 1) return fail("find: `act` works with a single `target`; with `targets` you get shortlists only.");
+      if (act === "fill" && typeof p.value !== "string") return fail("find: act:'fill' needs `value`.");
       try {
-        const snap = await jevSnapshot(ctl);
+        // Interactive-only state first (half the tokens → half the latency); one
+        // retry with page text when nothing matched, since some targets are
+        // described by nearby text rather than the control's own name.
+        let snap = await jevSnapshot(ctl, false);
         const refuse = driftRefusal(ctl, "snapshot", snap.url, prevMayNavigate);
-        if (refuse) { logAction({ tab_url: snap.url, tool: "find", value: target, ok: false, error: "drift refused" }); return fail(refuse); }
-        const r = await findTarget({ target, url: snap.url, title: snap.title, tree: snap.tree });
-        const top = r.ranked[0];
-        const detail = { target, exists: r.exists, confidence: r.confidence, top: r.ranked.slice(0, 3), tokens: r.inputTokens, requests: r.requests, model: r.model };
-        let header = `URL: ${snap.url}\nJev: ${r.candidates} candidates, exists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)} (${r.model}, ${r.inputTokens} tok)`;
+        if (refuse) { logAction({ tab_url: snap.url, tool: "find", value: targets.join(" | "), ok: false, error: "drift refused" }); return fail(refuse); }
+        let results = await findMany({ targets, url: snap.url, title: snap.title, tree: snap.tree });
+        let retried = false;
+        if (results.every((r) => r.exists < THRESHOLDS.exists)) {
+          snap = await jevSnapshot(ctl, true);
+          const again = await findMany({ targets, url: snap.url, title: snap.title, tree: snap.tree });
+          again[0].inputTokens += results[0].inputTokens; again[0].requests += results[0].requests;
+          results = again; retried = true;
+        }
+        const tok = results[0].inputTokens, reqs = results[0].requests, model = results[0].model;
+        let header = `URL: ${snap.url}\nJev: ${results[0].candidates} candidates, ${reqs} request${reqs === 1 ? "" : "s"}, ${tok} tok (${model})${retried ? ", retried with page text" : ""}`;
         header += maybeAutoPin(ctl, snap.tabId) + noteUrl(ctl, snap.url);
+        const detail: any = { targets, results: results.map((r) => ({ target: r.target, exists: r.exists, confidence: r.confidence, top: r.ranked.slice(0, 3) })), tokens: tok, requests: reqs, model, retried };
+
+        if (targets.length > 1) {
+          const blocks = results.map((r) => r.exists < THRESHOLDS.exists
+            ? `${JSON.stringify(r.target)}: nothing matches (exists ${pct(r.exists)}); closest ${r.ranked[0] ? `[${r.ranked[0].ref}] ${JSON.stringify(r.ranked[0].name)} ${pct(r.ranked[0].p)}` : "—"}`
+            : `${JSON.stringify(r.target)} → [${r.ranked[0].ref}] ${r.ranked[0].role} ${JSON.stringify(r.ranked[0].name)}  ${pct(r.ranked[0].p)}, conf ${r.confidence.toFixed(2)}${r.ranked[1] ? `  (then [${r.ranked[1].ref}] ${pct(r.ranked[1].p)})` : ""}`);
+          logAction({ tab_url: snap.url, tool: "find", value: targets.join(" | "), ok: true, element_count: results[0].candidates, detail: { ...detail, outcome: "multi" } });
+          return ok(`${header}\n${blocks.join("\n")}\nAct with browser_click / browser_fill on those refs (same snapshot, refs are live until the DOM changes).`);
+        }
+
+        const r = results[0]; const target = r.target; const top = r.ranked[0];
         if (!top || r.exists < THRESHOLDS.exists) {
-          logAction({ tab_url: snap.url, tool: "find", value: target, ok: false, error: "no match", element_count: r.candidates, detail });
-          return fail(`${header}\nNothing on this page matches ${JSON.stringify(target)}. Closest guesses:\n${formatShortlist(r.ranked)}\nUse browser_snapshot to look yourself, or rephrase the target.`);
+          logAction({ tab_url: snap.url, tool: "find", value: target, ok: false, error: "no match", element_count: r.candidates, detail: { ...detail, outcome: "no-match" } });
+          return fail(`${header}\nNothing on this page matches ${JSON.stringify(target)} (exists ${pct(r.exists)}). Closest guesses:\n${formatShortlist(r.ranked)}\nUse browser_snapshot to look yourself, or rephrase the target.`);
         }
-        const href = await hrefOf(ctl, top);
+        header += `\nexists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)}`;
+        const [href] = await Promise.all([hrefOf(ctl, top)]);
         const hrefLine = href ? `\n  → ${href}   (browser_navigate here to skip the click)` : "";
-        if (p.act === "click") {
-          if (r.confidence < THRESHOLDS.actConfidence) {
-            logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "shortlist:low-confidence" } });
-            return ok(`${header}\nNot clicking: confidence ${r.confidence.toFixed(2)} < ${THRESHOLDS.actConfidence}. Pick one yourself:\n${formatShortlist(r.ranked)}${hrefLine}`);
-          }
-          const g = await guardClick(top, target, snap.url);
-          if (g >= THRESHOLDS.guard) {
-            logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: g, outcome: "refused:guard" } });
-            return ok(`${header}\nRefusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: it may be irreversible (guard ${pct(g)}). Click it explicitly with browser_click if intended.\n${formatShortlist(r.ranked)}${hrefLine}`);
-          }
-          const c = await callExtension(ctl, "click", { ref: top.ref });
-          ctl.lastOpMayNavigate = true;
-          logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: g, outcome: "clicked" } });
-          return ok(`${header}\nClicked [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}, guard ${pct(g)}).${noteUrl(ctl, c?.url)}\nRunner-ups: ${r.ranked.slice(1, 3).map((x) => `[${x.ref}] ${JSON.stringify(x.name)} ${pct(x.p)}`).join(", ") || "none"}. Re-snapshot or browser_find again for the next step.`);
+        if (act === "none") {
+          logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "shortlist" } });
+          return ok(`${header}\nBest match for ${JSON.stringify(target)}:\n${formatShortlist(r.ranked)}${hrefLine}\nbrowser_click({ref:${top.ref}}) to act, or pass act:"click" next time.`);
         }
-        logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "shortlist" } });
-        return ok(`${header}\nBest match for ${JSON.stringify(target)}:\n${formatShortlist(r.ranked)}${hrefLine}\nbrowser_click({ref:${top.ref}}) to act, or pass act:"click" next time.`);
-      } catch (e: any) { logAction({ tool: "find", value: target, ok: false, error: e.message }); return fail(e.message); }
+        if (r.confidence < THRESHOLDS.actConfidence) {
+          logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: `shortlist:low-confidence:${act}` } });
+          return ok(`${header}\nNot acting: confidence ${r.confidence.toFixed(2)} < ${THRESHOLDS.actConfidence}. Pick one yourself:\n${formatShortlist(r.ranked)}${hrefLine}`);
+        }
+        if (act === "fill") {
+          const f = await callExtension(ctl, "fill", { ref: top.ref, value: p.value });
+          ctl.lastOpMayNavigate = true;
+          logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "filled", fillValue: p.value } });
+          return ok(`${header}\nFilled [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}) with ${JSON.stringify(p.value)}.${noteUrl(ctl, f?.url)}\nRunner-up: ${r.ranked[1] ? `[${r.ranked[1].ref}] ${JSON.stringify(r.ranked[1].name)} ${pct(r.ranked[1].p)}` : "none"}.`);
+        }
+        const { g, asked } = await maybeGuard(top, target, snap.url);
+        if (g >= THRESHOLDS.guard) {
+          logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: g, outcome: "refused:guard" } });
+          return ok(`${header}\nRefusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: it may be irreversible (guard ${pct(g)}). Click it explicitly with browser_click if intended.\n${formatShortlist(r.ranked)}${hrefLine}`);
+        }
+        const c = await settledClick(ctl, top.ref);
+        logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: asked ? g : "skipped", outcome: "clicked", settled: c?.settled } });
+        return ok(`${header}\nClicked [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}${asked ? `, guard ${pct(g)}` : ""}).${fmtSettle(c)}${noteUrl(ctl, c?.url)}\nRunner-ups: ${r.ranked.slice(1, 3).map((x) => `[${x.ref}] ${JSON.stringify(x.name)} ${pct(x.p)}`).join(", ") || "none"}. browser_find again for the next step.`);
+      } catch (e: any) { logAction({ tool: "find", value: targets.join(" | "), ok: false, error: e.message }); return fail(e.message); }
     }
     case "pursue": {
       const goal = String(p.goal ?? "").trim();
       const maxSteps = Math.min(Math.max(Number(p.maxSteps ?? 6), 1), 12);
       if (!goal) return fail("pursue: `goal` is required.");
       const trail: string[] = [];
-      let tokens = 0;
+      let tokens = 0, jevMs = 0, settleMs = 0;
+      const t0 = performance.now();
       const done = async (verdict: string, url: string, tabId?: number) => {
-        // Hand back a compact view of where we stopped so the caller can continue.
         let tail = "";
-        try { const s = await callExtension(ctl, "snapshot", { interactiveOnly: true, filters: listFilters(), chrome: true, collapse: true, dedup: true }); tail = `\n\nFinal page (interactive only, ${s.count} refs):\n${s.tree}`; } catch {}
-        logAction({ tab_url: url, tool: "pursue", value: goal, ok: true, element_count: trail.length, detail: { goal, verdict, trail, tokens } });
-        return ok(`${verdict}\nURL: ${url}\nTrail (${trail.length} step${trail.length === 1 ? "" : "s"}, ${tokens} Jev tokens):\n${trail.map((t, i) => `  ${i + 1}. ${t}`).join("\n") || "  (none)"}${maybeAutoPin(ctl, tabId)}${tail}`);
+        if (p.finalSnapshot) {
+          try { const s = await callExtension(ctl, "snapshot", { interactiveOnly: true, filters: listFilters(), chrome: true, collapse: true, dedup: true }); tail = `\n\nFinal page (interactive only, ${s.count} refs):\n${s.tree}`; } catch {}
+        }
+        const total = Math.round(performance.now() - t0);
+        logAction({ tab_url: url, tool: "pursue", value: goal, ok: true, element_count: trail.length, detail: { goal, verdict, trail, tokens, ms: { total, jev: jevMs, settle: settleMs } } });
+        return ok(`${verdict}\nURL: ${url}\nTrail (${trail.length} step${trail.length === 1 ? "" : "s"}; ${total} ms total, Jev ${Math.round(jevMs)} ms, page settle ${settleMs} ms, ${tokens} Jev tokens):\n${trail.map((t, i) => `  ${i + 1}. ${t}`).join("\n") || "  (none)"}${maybeAutoPin(ctl, tabId)}${tail}${p.finalSnapshot ? "" : "\nbrowser_find / browser_snapshot to continue (pass finalSnapshot:true to get the page inline)."}`);
       };
       try {
+        let lastClick: any = null;
         for (let step = 1; step <= maxSteps; step++) {
-          const snap = await jevSnapshot(ctl);
+          const snap = await jevSnapshot(ctl, true); // text needed for the `reached` verdict
+          const tj = performance.now();
           const r = await findTarget({ target: goal, url: snap.url, title: snap.title, tree: snap.tree, pursue: true });
-          tokens += r.inputTokens;
+          jevMs += performance.now() - tj; tokens += r.inputTokens;
           const top = r.ranked[0];
           if ((r.reached ?? 0) >= THRESHOLDS.reached) return done(`Goal reached (${pct(r.reached!)}) after ${step - 1} click${step === 2 ? "" : "s"}.`, snap.url, snap.tabId);
           if ((r.blocked ?? 0) >= THRESHOLDS.blocked) return done(`Stopped: this page needs a human step (login/CAPTCHA/consent, ${pct(r.blocked!)}).`, snap.url, snap.tabId);
           if (!top || r.exists < THRESHOLDS.exists || r.confidence < THRESHOLDS.stuck)
             return done(`Stuck: no confident next step toward ${JSON.stringify(goal)} (exists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)}). Candidates:\n${formatShortlist(r.ranked)}`, snap.url, snap.tabId);
-          const g = await guardClick(top, goal, snap.url);
+          const tg = performance.now();
+          const { g, asked } = await maybeGuard(top, goal, snap.url);
+          jevMs += performance.now() - tg;
           if (g >= THRESHOLDS.guard) return done(`Refusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: may be irreversible (guard ${pct(g)}). Do it explicitly with browser_click if intended.`, snap.url, snap.tabId);
-          await callExtension(ctl, "click", { ref: top.ref });
-          ctl.lastOpMayNavigate = true;
-          trail.push(`[${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}, conf ${r.confidence.toFixed(2)}) @ ${snap.url}`);
-          await Bun.sleep(1200);
+          lastClick = await settledClick(ctl, top.ref);
+          settleMs += lastClick?.settled?.settledMs ?? 0;
+          trail.push(`[${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}, conf ${r.confidence.toFixed(2)}${asked ? `, guard ${pct(g)}` : ""}, willReach ${pct(r.willReach ?? 0)}) @ ${snap.url}${fmtSettle(lastClick)}`);
+          // Speculative: Jev already judged that this click lands on the goal → skip the confirming snapshot+Jev round trip.
+          if ((r.willReach ?? 0) >= THRESHOLDS.willReach) return done(`Goal reached (predicted ${pct(r.willReach!)} before the click) after ${step} click${step === 1 ? "" : "s"}.`, lastClick?.url ?? snap.url, snap.tabId);
         }
-        const last = await jevSnapshot(ctl).catch(() => null);
-        return done(`Step limit (${maxSteps}) reached without a confident "goal reached" verdict.`, last?.url ?? ctl.lastUrl ?? "?", last?.tabId);
+        const last = await jevSnapshot(ctl, false).catch(() => null);
+        return done(`Step limit (${maxSteps}) reached without a confident "goal reached" verdict.`, last?.url ?? lastClick?.url ?? ctl.lastUrl ?? "?", last?.tabId);
       } catch (e: any) { logAction({ tool: "pursue", value: goal, ok: false, error: e.message, detail: { goal, trail, tokens } }); return fail(`${e.message}\nTrail so far:\n${trail.map((t, i) => `  ${i + 1}. ${t}`).join("\n")}`); }
     }
     default: return fail(`Unknown op '${op}'`);
@@ -352,6 +404,7 @@ if (process.argv.includes("--stop")) {
       },
     });
     console.error(`[hub] listening on ws://127.0.0.1:${WS_PORT}`);
+    warm().then(() => console.error("[hub] jev connection warm")); // first find should not pay the TLS handshake
   } catch {
     console.error(`[hub] port ${WS_PORT} busy — another hub is running; exiting.`);
     process.exit(0);
