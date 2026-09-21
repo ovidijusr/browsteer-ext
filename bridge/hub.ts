@@ -200,6 +200,35 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
     case "save_filter": try { const stored = upsertFilter({ name: p.name, match: p.match, root: p.root, drop: p.drop, dropText: p.dropText, extract: p.extract }); logAction({ tool: "save_filter", value: p.name, ok: true }); return ok(`Saved filter '${p.name}' (v${stored.version}) for ${p.match}. It now auto-applies on matching pages.`); } catch (e: any) { logAction({ tool: "save_filter", value: p.name, ok: false, error: e.message }); return fail(e.message); }
     case "list_filters": { const fs = listFilters(); return ok(fs.length ? fs.map((f) => `• ${f.name}  →  ${f.match}\n    root=${f.root ?? "—"}  drop=${f.drop?.length ?? 0}  dropText=${f.dropText?.length ?? 0}`).join("\n") : "No filters saved yet."); }
     case "delete_filter": { const okd = deleteFilter(p.name); logAction({ tool: "delete_filter", value: p.name, ok: okd }); return ok(okd ? `Deleted filter '${p.name}'.` : `No filter named '${p.name}'.`); }
+    case "requests": try {
+      const r = await callExtension(ctl, "requests", { filter: p.filter, limit: p.limit ?? 40, since: p.since, all: p.all ?? false, clear: p.clear ?? false });
+      if (!r.requests.length) return ok(`No matching requests logged (${r.total} total${p.filter ? ` before filter '${p.filter}'` : ""}). Do the UI action first, then call again; the log keeps the last 300 XHR/fetch calls across tabs.`);
+      const lines = r.requests.map((e: any) => {
+        const age = Math.round((r.now - e.ts) / 1000);
+        return `${e.method} ${e.url}\n    tab ${e.tabId} · ${age}s ago · ${e.status ?? "…"} ${e.mime ?? ""}${e.body ? `\n    body: ${e.body}` : ""}`;
+      });
+      return ok(`${r.requests.length} of ${r.total} requests (oldest first):\n${lines.join("\n")}`);
+    } catch (e: any) { return fail(e.message); }
+    case "fetch": try {
+      const method = (p.method ?? "GET").toUpperCase();
+      const r = await callExtension(ctl, "fetch", { url: p.url, headers: p.headers ?? {}, method, body: p.body }, 120_000);
+      const buf = Buffer.from(r.bodyBase64 ?? "", "base64");
+      const isText = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded)|.*\+(json|xml))/i.test(r.contentType ?? "");
+      let head = `HTTP ${r.status} ${r.contentType || "(no content-type)"} ${buf.length} bytes` + (r.finalUrl && r.finalUrl !== p.url ? `\n→ ${r.finalUrl}` : "");
+      if (p.saveTo) {
+        const path = String(p.saveTo).replace(/^~(?=\/|$)/, process.env.HOME ?? "~");
+        await Bun.write(path, buf);
+        logAction({ tab_url: p.url, tool: "fetch", value: path, ok: r.status < 400 });
+        const preview = isText ? `\n--- first ${Math.min(buf.length, p.preview ?? 600)} bytes ---\n${buf.subarray(0, p.preview ?? 600).toString("utf8")}` : "";
+        return (r.status < 400 ? ok : fail)(`${head}\nsaved → ${path}${preview}`);
+      }
+      logAction({ tab_url: p.url, tool: "fetch", ok: r.status < 400 });
+      if (!isText) return fail(`${head}\nBinary body — call again with saveTo:"<path>" to write it to disk (then Read the file).`);
+      const max = p.maxBytes ?? 50_000;
+      const text = buf.subarray(0, max).toString("utf8");
+      const trunc = buf.length > max ? `\n⚠ TRUNCATED at ${max} of ${buf.length} bytes — pass saveTo to get the whole body on disk.` : "";
+      return (r.status < 400 ? ok : fail)(`${head}${trunc}\n${text}`);
+    } catch (e: any) { logAction({ tool: "fetch", ok: false, error: e.message }); return fail(e.message); }
     default: return fail(`Unknown op '${op}'`);
   }
 }

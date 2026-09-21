@@ -1,0 +1,28 @@
+// Tiny control client for the running hub — call any op from a shell without MCP.
+//   bun run bridge/cli.ts <op> '<json params>' [--key bst-xxxx-yyyy]
+//   bun run bridge/cli.ts fetch '{"url":"https://…/forList?size=500","saveTo":"~/Downloads/forList.json"}' --key bst-dn5x-4ptm
+// Prints the op's text result; exit code 1 on isError. Starts nothing — the hub must be up
+// (any MCP call starts it, or `bun run bridge/hub.ts &`).
+const PORT = Number(process.env.BRIDGE_PORT ?? 8787);
+const [op, rawParams = "{}", ...rest] = process.argv.slice(2);
+if (!op) { console.error("usage: cli.ts <op> '<json>' [--key bst-…]"); process.exit(2); }
+const keyIdx = rest.indexOf("--key");
+const key = keyIdx >= 0 ? rest[keyIdx + 1] : null;
+const params = JSON.parse(rawParams);
+
+const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
+let seq = 0;
+const waits = new Map<string, (m: any) => void>();
+function call(o: string, p: any): Promise<any> {
+  const id = `${o}-${++seq}`;
+  return new Promise((res) => { waits.set(id, res); ws.send(JSON.stringify({ id, op: o, params: p })); });
+}
+ws.onmessage = (ev) => { const m = JSON.parse(String(ev.data)); waits.get(m.id)?.(m); waits.delete(m.id); };
+ws.onerror = () => { console.error("hub not reachable on", PORT); process.exit(1); };
+ws.onopen = async () => {
+  ws.send(JSON.stringify({ type: "hello", role: "control" }));
+  if (key) { const r = await call("pair", { key }); if (!r.ok) { console.error(r.text); process.exit(1); } }
+  const r = await call(op, params);
+  console.log(r.text);
+  process.exit(r.ok ? 0 : 1);
+};

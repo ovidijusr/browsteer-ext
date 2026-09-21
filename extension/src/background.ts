@@ -44,6 +44,40 @@ async function regenerateKey(): Promise<string> {
   return k;
 }
 
+// ── Request log ──────────────────────────────────────────────────────────────
+// Ring buffer of the XHR/fetch traffic pages make, so a caller can see exactly
+// which API call a UI action fired (URL, method, query, POST body) and replay
+// it with `fetch` — instead of asking the user to dig it out of DevTools.
+type ReqEntry = { id: string; tabId: number; ts: number; method: string; url: string; type: string; body?: string; status?: number; mime?: string };
+const REQ_MAX = 300;
+const reqLog: ReqEntry[] = [];
+const reqById = new Map<string, ReqEntry>();
+function decodeBody(details: any): string | undefined {
+  const rb = details.requestBody;
+  if (!rb) return undefined;
+  if (rb.formData) return JSON.stringify(rb.formData);
+  const raw = rb.raw?.[0]?.bytes;
+  if (!raw) return undefined;
+  try { return new TextDecoder().decode(new Uint8Array(raw)).slice(0, 4000); } catch { return `<${raw.byteLength} bytes>`; }
+}
+try {
+  browser.webRequest.onBeforeRequest.addListener(
+    (d: any) => {
+      if (d.tabId < 0) return;
+      const e: ReqEntry = { id: d.requestId, tabId: d.tabId, ts: d.timeStamp, method: d.method, url: d.url, type: d.type, body: decodeBody(d) };
+      reqLog.push(e); reqById.set(e.id, e);
+      while (reqLog.length > REQ_MAX) { const old = reqLog.shift(); if (old) reqById.delete(old.id); }
+    },
+    { urls: ["<all_urls>"], types: ["xmlhttprequest", "main_frame", "sub_frame"] },
+    ["requestBody"],
+  );
+  browser.webRequest.onCompleted.addListener(
+    (d: any) => { const e = reqById.get(d.requestId); if (e) { e.status = d.statusCode; e.mime = (d.responseHeaders ?? []).find((h: any) => h.name.toLowerCase() === "content-type")?.value; } },
+    { urls: ["<all_urls>"] },
+    ["responseHeaders"],
+  );
+} catch (e) { log("webRequest unavailable", e); }
+
 // ── Tab lookup ────────────────────────────────────────────────────────────────
 async function activeTabId(): Promise<number> {
   let [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
@@ -90,6 +124,39 @@ function connect() {
         const tabs = await browser.tabs.query({});
         const list = tabs.map((t) => ({ tabId: t.id, title: t.title, url: t.url, active: t.active }));
         ws?.send(JSON.stringify({ id: req.id, ok: true, result: { tabs: list } }));
+        return;
+      }
+      // fetch: GET a URL from the extension context — sends the user's cookies,
+      // so authenticated JSON/PDF endpoints that content scripts and the terminal
+      // can't reach (JSON viewer, pdf.js, TCC-protected cookie jar) come back as
+      // raw bytes. Base64 keeps binary intact over the JSON websocket.
+      if (req.op === "requests") {
+        const p = req.params ?? {};
+        let list = reqLog.filter((e) => e.type === "xmlhttprequest" || p.all);
+        if (p.tabId != null) list = list.filter((e) => e.tabId === p.tabId);
+        if (p.filter) { const re = new RegExp(String(p.filter), "i"); list = list.filter((e) => re.test(e.url)); }
+        if (p.since) list = list.filter((e) => e.ts >= p.since);
+        const out = list.slice(-(p.limit ?? 40));
+        if (p.clear) { reqLog.length = 0; reqById.clear(); }
+        ws?.send(JSON.stringify({ id: req.id, ok: true, result: { requests: out, total: list.length, now: Date.now() } }));
+        return;
+      }
+      if (req.op === "fetch") {
+        const method = String(req.params.method ?? "GET").toUpperCase();
+        const res = await fetch(String(req.params.url), {
+          method,
+          credentials: "include",
+          headers: req.params.headers ?? {},
+          body: method === "GET" || method === "HEAD" ? undefined : req.params.body,
+          redirect: "follow",
+        });
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000) as unknown as number[]);
+        ws?.send(JSON.stringify({
+          id: req.id, ok: true,
+          result: { status: res.status, contentType: res.headers.get("content-type") ?? "", finalUrl: res.url, size: bytes.length, bodyBase64: btoa(bin) },
+        }));
         return;
       }
       const tabId = await targetTabId(req.params);

@@ -145,6 +145,42 @@ tool("browser_navigate", {
   inputSchema: { url: z.string().url().describe("URL to load") },
 });
 
+tool("browser_fetch", {
+  title: "Fetch a URL with the browser's cookies",
+  description:
+    "GET a URL from inside the paired browser, with the user's logged-in cookies, and return the body " +
+    "(or save it to disk). Use for authenticated API/JSON/PDF/CSV endpoints that a snapshot can't read: " +
+    "Firefox's JSON viewer and pdf.js pages have no content script, and the terminal has no session. " +
+    "Text bodies are returned inline (truncated at maxBytes, default 50k); binary bodies and big exports " +
+    "should use saveTo (a local path, ~ allowed) and then be Read from disk. Never use for state-changing " +
+    "endpoints — it is GET-only by design.",
+  inputSchema: {
+    url: z.string().url().describe("Absolute URL to fetch"),
+    saveTo: z.string().optional().describe("Local file path to write the body to (e.g. ~/Downloads/export.json). Returns a short preview instead of the body."),
+    maxBytes: z.number().int().positive().optional().describe("Inline return cap for text bodies (default 50000)"),
+    preview: z.number().int().positive().optional().describe("With saveTo: how many leading bytes to echo (default 600)"),
+    headers: z.record(z.string()).optional().describe("Extra request headers, e.g. {Accept:'application/json'}"),
+    method: z.enum(["GET", "POST", "PUT", "PATCH"]).optional().describe("Default GET. Use another verb ONLY to replay a request the page itself fired (seen via browser_requests) — never to probe unknown endpoints with the user's session."),
+    body: z.string().optional().describe("Request body for non-GET replays (raw string; set Content-Type in headers)"),
+  },
+});
+
+tool("browser_requests", {
+  title: "Recent XHR/fetch requests the page made",
+  description:
+    "List the API calls pages have fired (method, URL with query string, POST body, status, mime) — the " +
+    "extension keeps the last 300 XHR/fetch requests across tabs. Use it to learn which endpoint and " +
+    "parameters a UI action (filter form, pager, export button) actually hits, then replay it with " +
+    "browser_fetch. Typical loop: browser_requests({clear:true}) → do the UI action → browser_requests({filter:'api/'}).",
+  inputSchema: {
+    filter: z.string().optional().describe("Regex matched against the URL, e.g. 'documents2|forList'"),
+    limit: z.number().int().positive().optional().describe("Max entries, newest kept (default 40)"),
+    since: z.number().optional().describe("Only requests after this epoch-ms timestamp"),
+    all: z.boolean().optional().describe("Include page navigations (main_frame/sub_frame), not just XHR/fetch"),
+    clear: z.boolean().optional().describe("Empty the log after returning — call before a UI action to isolate its traffic"),
+  },
+});
+
 tool("browser_html", {
   title: "Get raw HTML (escape hatch)",
   description:
