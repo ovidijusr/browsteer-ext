@@ -271,6 +271,19 @@ tool("browser_find", {
     targets: z.array(z.string()).min(2).max(8).optional().describe("Several targets answered in ONE request (e.g. ['email field','password field','sign in button']); returns one ref per target, no act"),
     act: z.enum(["none", "click", "fill"]).optional().describe("'click' = click the top match if confident; 'fill' = type `value` into it (default 'none' = shortlist only). Single target only."),
     value: z.string().optional().describe("Text to type when act is 'fill'"),
+    fresh: z.boolean().optional().describe("Bypass the memo store and ask Jev even if this host already resolved the target before (default false)"),
+  },
+});
+
+tool("browser_memos", {
+  title: "List or forget target memos",
+  description:
+    "Memos are the Jev bypass: after a confident browser_find, the host + target + matched role/name are stored, and later finds " +
+    "of the same target on that host resolve by matching the fresh snapshot with no Jev call (0 tokens, ~50 ms). This lists them " +
+    "(hits + last use) or forgets them — clear a host after a site redesign renames its controls.",
+  inputSchema: {
+    host: z.string().optional().describe("Only this host (e.g. 'music.ovi.lt')"),
+    clear: z.union([z.boolean(), z.string()]).optional().describe("true = forget all memos; a host string = forget that host's"),
   },
 });
 

@@ -117,3 +117,59 @@ export function listFilters(): Filter[] {
 export function deleteFilter(name: string): boolean {
   return deleteStmt.run({ $name: name }).changes > 0;
 }
+
+// ── Target memos (Jev bypass) ────────────────────────────────────────────────
+// A memo remembers that, on this host, the plain-language target resolved to an
+// element with this role + name (Jev said so with high confidence). Next time the
+// hub matches the memo against the fresh snapshot and skips Jev entirely — zero
+// tokens, zero round trip. Matching rules live in jev.ts (memoMatch).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS memos (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    host       TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    hits       INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    last_hit   INTEGER NOT NULL,
+    UNIQUE(host, target)
+  );
+`);
+
+export interface Memo { id: number; host: string; target: string; role: string; name: string; hits: number; created_at: number; last_hit: number }
+
+/** Lowercase, single-spaced, no trailing punctuation — so "The Playlists tab." and "the playlists tab" share a memo. */
+export function normTarget(t: string): string {
+  return t.toLowerCase().replace(/\s+/g, " ").replace(/[\s.!?,;:]+$/g, "").trim();
+}
+export function hostOf(url: string): string {
+  try { return new URL(url).host; } catch { return url; }
+}
+
+const memoGet = db.query<Memo, { $host: string; $target: string }>(`SELECT * FROM memos WHERE host = $host AND target = $target`);
+const memoPut = db.prepare(
+  `INSERT INTO memos (host, target, role, name, hits, created_at, last_hit) VALUES ($host, $target, $role, $name, 0, $now, $now)
+   ON CONFLICT(host, target) DO UPDATE SET role = $role, name = $name, hits = 0, created_at = $now, last_hit = $now`
+);
+const memoHit = db.prepare(`UPDATE memos SET hits = hits + 1, last_hit = $now WHERE id = $id`);
+const memoDel = db.prepare(`DELETE FROM memos WHERE id = $id`);
+const memoDelHost = db.prepare(`DELETE FROM memos WHERE host = $host`);
+const memoDelAll = db.prepare(`DELETE FROM memos`);
+const memoPrune = db.prepare(`DELETE FROM memos WHERE last_hit < $before`);
+const memoList = db.query<Memo, []>(`SELECT * FROM memos ORDER BY host, hits DESC, target`);
+const memoListHost = db.query<Memo, { $host: string }>(`SELECT * FROM memos WHERE host = $host ORDER BY hits DESC, target`);
+
+export function getMemo(url: string, target: string): Memo | null {
+  return memoGet.get({ $host: hostOf(url), $target: normTarget(target) }) ?? null;
+}
+export function saveMemo(url: string, target: string, role: string, name: string): void {
+  memoPut.run({ $host: hostOf(url), $target: normTarget(target), $role: role, $name: name, $now: Date.now() });
+}
+export function bumpMemo(id: number): void { memoHit.run({ $id: id, $now: Date.now() }); }
+export function dropMemo(id: number): void { memoDel.run({ $id: id }); }
+export function clearMemos(host?: string): number {
+  return host ? memoDelHost.run({ $host: host }).changes : memoDelAll.run().changes;
+}
+export function pruneMemos(maxAgeMs: number): number { return memoPrune.run({ $before: Date.now() - maxAgeMs }).changes; }
+export function listMemos(host?: string): Memo[] { return host ? memoListHost.all({ $host: host }) : memoList.all(); }

@@ -26,10 +26,41 @@ export const THRESHOLDS = {
 // Guard is only asked when the candidate's name smells like a commitment. Links
 // only navigate; unlabelled or neutral buttons on a click path are not worth a
 // 250 ms round trip. Tune here; matched names are visible in actions.detail.
-export const RISK_RE = /\b(buy|purchase|order|checkout|pay|payment|subscribe|unsubscribe|send|submit|confirm|approve|post|publish|reply|share|delete|remove|erase|cancel|log ?out|sign ?out|transfer|book|reserve|donate|pirkti|užsakyti|apmok|mokė|prenumer|siųsti|siusti|patvirtin|ištrin|istrin|šalin|salin|atšauk|atsauk|atsijung|užsisak|rezervuo|paskelb|dalintis|atsakyti)/i;
+//
+// English words are whole-word (`\bbook\b` no longer fires on "Booking.com",
+// `\bpost\b` not on "Posts"); Lithuanian entries stay stems because of inflection.
+// STRONG words guard every role. WEAK words are commitments only on buttons
+// ("Order" / "Post" / "Share" as a nav link is a section, not an action).
+export const RISK_RE = /\b(buy|purchase|checkout|pay|payment|subscribe|unsubscribe|send|submit|confirm|approve|publish|delete|remove|erase|log ?out|sign ?out|transfer|donate)\b|(pirkti|užsakyti|apmok|mokė|prenumer|siųsti|siusti|patvirtin|ištrin|istrin|šalin|salin|atšauk|atsauk|atsijung|užsisak|rezervuo|paskelb|dalintis|atsakyti)/i;
+export const RISK_WEAK_RE = /\b(order|post|reply|share|cancel|book|reserve)\b/i;
 export function needsGuard(c: { role: string; name: string }): boolean {
-  if (c.role === "link" && !RISK_RE.test(c.name)) return false;
-  return RISK_RE.test(c.name) || c.name.trim().length < 2; // nameless controls stay guarded
+  if (RISK_RE.test(c.name)) return true;
+  if (c.role === "link") return false;
+  return RISK_WEAK_RE.test(c.name) || c.name.trim().length < 2; // nameless controls stay guarded
+}
+
+// ── Memos: skip Jev when this host already taught us the answer ─────────────
+// A memo is written only after a confident Jev verdict (see MEMO below) and is
+// matched against the FRESH snapshot, so a renamed or removed control falls
+// back to Jev instead of clicking a ghost. Trailing digits are ignored in the
+// name comparison because apps append live counts ("Playlists42" → 43 tomorrow).
+export const MEMO = {
+  minExists: 0.7,      // write a memo only when Jev was sure the target exists…
+  minConfidence: 0.85, // …and sure which element it is…
+  minP: 0.8,           // …with the winner clearly ahead of the runner-up
+  ttlDays: 30,         // memos not hit for this long are pruned at hub start
+} as const;
+export function normName(name: string): string {
+  return name.toLowerCase().replace(/\s+/g, " ").replace(/\s*\(?\d+\)?\s*$/, "").trim();
+}
+/** The one candidate the memo names, or null when none / several distinct elements match (→ ask Jev). */
+export function memoMatch(memo: { role: string; name: string }, cands: Candidate[]): Candidate | null {
+  const want = normName(memo.name);
+  const hits = cands.filter((c) => c.role === memo.role && normName(c.name) === want);
+  if (!hits.length) return null;
+  // Exact duplicates (same role + raw name, e.g. a header and a footer "New playlist") are one element for our purposes.
+  const distinct = new Set(hits.map((c) => `${c.role}\u0000${c.name}`));
+  return distinct.size === 1 ? hits[0] : null;
 }
 
 // Warm the TLS connection at hub start so the first find is not the slow one.
@@ -93,6 +124,34 @@ export function trimState(tree: string, max = MAX_STATE_CHARS): string {
   return s.slice(0, s.lastIndexOf("\n"));
 }
 
+// Exact (role, name) duplicates carry no extra information for the model — the
+// same "New playlist" button in a header and a toolbar, or a row and its
+// sibling action with the same label. Keep the first ref, drop the others from
+// BOTH the state and the option list; the survivor's ref still clicks the
+// visible element. Distinct names (even "X" vs "X tracks") are kept: only the
+// model can tell those apart.
+export function dedupeCandidates(cands: Candidate[]): { kept: Candidate[]; dropped: number } {
+  const seen = new Set<string>();
+  const kept: Candidate[] = [];
+  for (const c of cands) {
+    const k = `${c.role}\u0000${c.name}`;
+    if (seen.has(k)) continue;
+    seen.add(k); kept.push(c);
+  }
+  return { kept, dropped: cands.length - kept.length };
+}
+// Rebuild the tree from a candidate subset: indentation flattened to one level
+// (nesting adds tokens and Jev ranks by role + name, not depth), names capped so
+// one 400-char listing title cannot eat the budget of forty others.
+export const NAME_CAP = 96;
+export function slimTree(cands: Candidate[]): string {
+  return cands.map((c) => {
+    const name = c.name.length > NAME_CAP ? c.name.slice(0, NAME_CAP - 1) + "…" : c.name;
+    const state = c.line.match(/\s(=\S.*)$/)?.[1];
+    return `  [${c.ref}] ${c.role} ${JSON.stringify(name)}${state ? " " + state.slice(0, 40) : ""}`;
+  }).join("\n");
+}
+
 export function chunk<T>(arr: T[], n: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
@@ -112,6 +171,15 @@ const Q = {
       true: "At least one [numbered] element on the page is the control, link, or item the target describes",
       false: "No element on the page corresponds to the target; the page is the wrong place or the target is not present",
     }),
+  // Pursue variant: an intermediate hop is a legitimate answer. The plain
+  // `exists` question says "no" on a list page whose section tab leads to the
+  // goal (47% on the playlists page for "open the Lithuanian library", while the
+  // Choice was 88% sure of the Libraries tab) and stopped the walk one hop short.
+  existsToward: (goal: string) =>
+    noul(`Does \`page\` contain an element a user would activate either to accomplish "${goal}" or as the next step on the way to it (a section, tab, category, menu, or link that leads there)?`, {
+      true: "At least one [numbered] element is the target itself or clearly leads toward it",
+      false: "Nothing on the page brings a user closer to the goal; this is the wrong place",
+    }),
   reached: (goal: string) =>
     noul(`Does \`page\` already show the outcome of: "${goal}", so that no further navigation is needed?`, {
       true: "The page content itself is the requested result (the item, article, form, or listing is open on screen)",
@@ -127,6 +195,10 @@ const Q = {
       true: "Activating that element opens the requested item, page, or view directly",
       false: "It leads to an intermediate step that still needs more navigation",
     }),
+  // Asked only when `exists` says the target is NOT on this page: a one-hop hint
+  // (section tab, menu, category) so a miss becomes a click instead of a dead end.
+  toward: (target: string, c: Candidate[]) =>
+    choice(`The target "${target}" is not on \`page\` itself. Which element (identified by its [number]) would a user activate to get CLOSER to it — the section, tab, menu, category, or link that leads there?`, idOptions(c)),
   guard: () =>
     noul("Would activating `element` buy, pay, subscribe, send a message or email, post publicly, delete, cancel, log out, or otherwise make an irreversible or externally visible change?", {
       true: "It commits an order, payment, message, deletion, or account change",
@@ -145,33 +217,52 @@ export interface FindResult {
   blocked?: number;          // pursue only
   willReach?: number;        // pursue only
   candidates: number;
+  deduped: number;           // exact-duplicate controls removed from the state
   model: string;
   inputTokens: number;
   requests: number;
 }
 
-export interface FindInput { target: string; url: string; title?: string; tree: string; pursue?: boolean }
-export interface FindManyInput { targets: string[]; url: string; title?: string; tree: string; pursue?: boolean }
+// `history` (pursue): the hops already taken, so the model knows which view it
+// is in and does not steer back. `exclude`: refs the caller has already clicked
+// on this very page (as role+name keys from `candKey`, since refs are reassigned
+// per snapshot) — they leave the option list so a loop cannot re-pick them.
+export const candKey = (c: { role: string; name: string }) => `${c.role}\u0000${c.name}`;
+interface Common { url: string; title?: string; tree: string; pursue?: boolean; history?: string; exclude?: Set<string> }
+export interface FindInput extends Common { target: string }
+export interface FindManyInput extends Common { targets: string[] }
 
 export async function findTarget(inp: FindInput): Promise<FindResult> {
   return (await findMany({ ...inp, targets: [inp.target] }))[0];
+}
+
+// The state Jev sees. Interactive-only trees are rebuilt slim (deduped, flat,
+// capped names); trees with page text are kept as-is (minus dedup is not
+// possible without losing the text's position) and only trimmed to budget.
+function buildState(inp: Common): { tree: string; cands: Candidate[]; deduped: number } {
+  const raw = trimState(inp.tree);
+  const all = parseCandidates(raw).filter((c) => !inp.exclude?.has(candKey(c)));
+  const hasText = /^\s*"/m.test(raw);
+  if (hasText) return { tree: raw, cands: all, deduped: 0 };
+  const { kept, dropped } = dedupeCandidates(all);
+  return { tree: slimTree(kept), cands: kept, deduped: dropped };
 }
 
 // Several targets against ONE snapshot in ONE request (speculative fan-out):
 // every target gets its own Choice(+batches) and exists Noul; the page-level
 // pursue questions are asked once. Results come back in `targets` order.
 export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
-  const tree = trimState(inp.tree);
-  const cands = parseCandidates(tree);
-  const empty = (t: string): FindResult => ({ target: t, exists: 0, confidence: 0, ranked: [], candidates: 0, model: "-", inputTokens: 0, requests: 0 });
+  const { tree, cands, deduped } = buildState(inp);
+  const empty = (t: string): FindResult => ({ target: t, exists: 0, confidence: 0, ranked: [], candidates: 0, deduped, model: "-", inputTokens: 0, requests: 0 });
   if (!cands.length) return inp.targets.map(empty);
-  const state = { url: inp.url, title: inp.title ?? "", page: tree };
+  const state: Record<string, string> = { url: inp.url, title: inp.title ?? "", page: tree };
+  if (inp.history) state.history = inp.history;
   const byRef = new Map(cands.map((c) => [c.ref, c]));
   const batches = chunk(cands, CHOICE_MAX);
 
   const questions: Record<string, any> = {};
   inp.targets.forEach((t, ti) => {
-    questions[`exists_${ti}`] = Q.exists(t);
+    questions[`exists_${ti}`] = inp.pursue ? Q.existsToward(t) : Q.exists(t);
     batches.forEach((b, bi) => { questions[`where_${ti}_${bi}`] = Q.where(t, b); });
   });
   if (inp.pursue) {
@@ -219,11 +310,29 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
       blocked: inp.pursue ? A.blocked.noul : undefined,
       willReach: inp.pursue ? A.willReach.noul : undefined,
       candidates: cands.length,
+      deduped,
       model: r1.model,
       inputTokens: ti === 0 ? inputTokens : 0, // tokens are billed once per request; attribute to the first
       requests: ti === 0 ? requests : 0,
     };
   });
+}
+
+// After a miss: one Choice over the same (slim) state asking which element
+// leads TOWARD the target. Returned as a hint; the hub never clicks it itself.
+export interface Toward { ranked: Ranked[]; confidence: number; inputTokens: number }
+export async function findToward(inp: FindInput): Promise<Toward | null> {
+  const { tree, cands } = buildState(inp);
+  if (!cands.length) return null;
+  const batch = cands.slice(0, CHOICE_MAX); // a hint does not warrant the two-pass dance
+  const byRef = new Map(batch.map((c) => [c.ref, c]));
+  const state: Record<string, string> = { url: inp.url, title: inp.title ?? "", page: tree };
+  const r = await client().systemOne({ state, questions: { toward: Q.toward(inp.target, batch) } });
+  const a = r.answers.toward as any;
+  const ranked: Ranked[] = Object.entries(a.probabilities as Record<string, number>)
+    .map(([ref, p]) => ({ ref: Number(ref), p, role: byRef.get(Number(ref))?.role ?? "?", name: byRef.get(Number(ref))?.name ?? "" }))
+    .sort((x, y) => y.p - x.p).slice(0, 3);
+  return { ranked, confidence: a.confidence, inputTokens: r.usage.input_tokens };
 }
 
 // Tiny second request: only the chosen element's line plus the goal, so the
