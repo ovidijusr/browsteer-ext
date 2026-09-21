@@ -121,13 +121,30 @@ async function maybeGuard(cand: Ranked, goal: string, url: string): Promise<{ g:
   if (!needsGuard(cand)) return { g: 0, asked: false };
   return { g: await guardClick(cand, goal, url), asked: true };
 }
-// Click and wait for the page to react (URL change / DOM quiet / unload), capped.
+// Click, then wait for the page to react by polling the content script's
+// mutation counter from HERE (page timers are throttled in background tabs;
+// extension messaging is not). Settled = URL changed, or no DOM mutations for
+// QUIET_MS after at least MIN_MS, or the cap. A poll that fails means the
+// document is unloading (full navigation): keep polling until the new document
+// answers or the cap hits.
+const QUIET_MS = 150, MIN_MS = 80, POLL_MS = 60;
 async function settledClick(ctl: Controller, ref: number, maxMs = 1500): Promise<any> {
-  const r = await callExtension(ctl, "click", { ref, settle: maxMs });
+  const r = await callExtension(ctl, "click", { ref });
   ctl.lastOpMayNavigate = true;
-  // Old content script (not reloaded yet) knows no `settle`: fall back to a short fixed wait.
-  if (!r?.settled) { await Bun.sleep(600); return { ...r, settled: { settledMs: 600, urlChanged: false, unloading: false, fallback: true } }; }
-  return r;
+  if (!r?.pulse) { await Bun.sleep(600); return { ...r, settled: { settledMs: 600, urlChanged: false, unloading: false, fallback: true } }; } // old content script
+  const t0 = performance.now(); const startUrl = r.url;
+  let last = r.mutations as number, lastChange = t0, unloading = false, url = startUrl;
+  while (performance.now() - t0 < maxMs) {
+    await Bun.sleep(POLL_MS);
+    let pl: any;
+    try { pl = await callExtension(ctl, "pulse", {}, 1500); } catch { unloading = true; continue; }
+    url = pl.url;
+    if (url !== startUrl && !unloading) break;              // SPA route change → reacted
+    if (unloading && pl.ready !== "loading") break;         // new document is up
+    if (pl.mutations !== last) { last = pl.mutations; lastChange = performance.now(); continue; }
+    if (performance.now() - lastChange >= QUIET_MS && performance.now() - t0 >= MIN_MS) break;
+  }
+  return { url, settled: { settledMs: Math.round(performance.now() - t0), urlChanged: url !== startUrl, unloading } };
 }
 const fmtSettle = (r: any) => r?.settled ? ` settled ${r.settled.settledMs} ms${r.settled.unloading ? ", full navigation" : r.settled.urlChanged ? ", URL changed" : ""}` : "";
 async function hrefOf(ctl: Controller, cand: Ranked): Promise<string> {
@@ -201,7 +218,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         return ok(`${header}\n\n${body || "no links found"}`);
       } catch (e: any) { logAction({ tool: "links", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
     }
-    case "click": try { const r = await callExtension(ctl, "click", { ref: p.ref, settle: p.settle ?? 800 }); logAction({ tab_url: r?.url, tool: "click", ref: p.ref, ok: true }); return ok(`Clicked [${p.ref}].${fmtSettle(r)} Re-snapshot to see the result.${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "click", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
+    case "click": try { const r = p.settle === 0 ? await callExtension(ctl, "click", { ref: p.ref }) : await settledClick(ctl, p.ref, p.settle ?? 800); logAction({ tab_url: r?.url, tool: "click", ref: p.ref, ok: true }); return ok(`Clicked [${p.ref}].${fmtSettle(r)} Re-snapshot to see the result.${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "click", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
     case "fill": try { const r = await callExtension(ctl, "fill", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: true }); return ok(`Filled [${p.ref}] with ${JSON.stringify(p.value)}.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "select": try { const r = await callExtension(ctl, "select", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "select", ref: p.ref, value: p.value, ok: true }); return ok(`Selected "${r.selected}" in [${p.ref}].${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "select", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "options": try { const r = await callExtension(ctl, "options", { ref: p.ref }); logAction({ tool: "options", ref: p.ref, ok: true }); return ok(r.options.join("\n")); } catch (e: any) { return fail(e.message); }
