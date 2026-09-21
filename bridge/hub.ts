@@ -400,7 +400,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
       const rows = listMemos(p.host ? String(p.host) : undefined);
       if (!rows.length) return ok("No memos yet. They are written after confident browser_find verdicts and matched by role + name on later finds.");
       return ok(`${rows.length} memo${rows.length === 1 ? "" : "s"} (host | target → role "name" | hits, last hit):\n` +
-        rows.map((m) => `  ${m.host} | ${JSON.stringify(m.target)} → ${m.role} ${JSON.stringify(m.name)} | ${m.hits}, ${new Date(m.last_hit).toISOString().slice(0, 16).replace("T", " ")}`).join("\n") +
+        rows.map((m) => `  ${m.host} | ${JSON.stringify(m.target)} → ${m.role} ${JSON.stringify(m.name)} | ${m.hits}, ${new Date(m.last_hit).toLocaleString("sv-SE").slice(0, 16)}`).join("\n") +
         `\nbrowser_memos({clear:"<host>"}) or {clear:true} to forget; browser_find({fresh:true}) bypasses memos once.`);
     }
     case "pursue": {
