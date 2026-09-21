@@ -312,7 +312,7 @@ export function factorUrls(urls: string[]): { prefix: string; suffix: string; mi
   return { prefix, suffix, mids };
 }
 
-function absoluteHref(el: Element, baseHref: string): string {
+export function absoluteHref(el: Element, baseHref: string): string {
   const a = el.tagName === "A" && el.hasAttribute("href") ? el : el.querySelector("a[href]");
   const raw = a?.getAttribute("href");
   if (!raw || raw.startsWith("#") || /^(javascript|mailto|tel):/i.test(raw)) return "";

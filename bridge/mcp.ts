@@ -255,6 +255,39 @@ tool("browser_save_filter", {
   },
 });
 
+tool("browser_find", {
+  title: "Find (and optionally click) an element by describing it",
+  description:
+    "Jev-powered targeting: describe the element in plain language and the bridge picks the matching [ref] " +
+    "from a fresh snapshot for you — you get a 5-line shortlist instead of the whole tree. Prefer this over " +
+    "browser_snapshot + browser_click whenever you can NAME the target ('the login button', 'next page', " +
+    "'the listing titled …', 'the search box'). With act:'click' it also clicks the top match when confidence " +
+    "is high and the element is not an irreversible action (buy/send/delete are refused — click those " +
+    "explicitly). If the winner is a link, its URL is included so you can browser_navigate directly. " +
+    "Not for numeric/date comparisons ('cheapest', 'newest'): use an extraction filter and sort yourself. " +
+    "Still needs browser_snapshot when the page is unfamiliar or the result says nothing matched.",
+  inputSchema: {
+    target: z.string().describe("What to find, as a user would say it, e.g. 'the Weiter / next page control'"),
+    act: z.enum(["none", "click"]).optional().describe("'click' = click the top match if confident (default 'none' = just return the shortlist)"),
+  },
+});
+
+tool("browser_pursue", {
+  title: "Let Jev browse toward a goal (click-only, bounded)",
+  description:
+    "Multi-page navigation without a Claude turn per hop: the bridge snapshots, asks Jev which element leads " +
+    "toward the goal, clicks it, and repeats (default 6 steps, max 12) until Jev judges the goal is on screen, " +
+    "the page needs a human (login/CAPTCHA/consent), no step is confident, or the next click looks irreversible. " +
+    "It NEVER types, selects, or presses keys — use browser_fill/browser_select for forms and searches, then " +
+    "pursue from the results. Returns the trail of clicks and a compact snapshot of the final page. " +
+    "Good goals name a destination: 'open the first BMW i4 listing', 'get to the invoices page', 'open the " +
+    "documentation for the Python SDK'.",
+  inputSchema: {
+    goal: z.string().describe("Destination or outcome to reach, as a user would phrase it"),
+    maxSteps: z.number().int().min(1).max(12).optional().describe("Click budget (default 6)"),
+  },
+});
+
 tool("browser_list_filters", {
   title: "List pruning filters",
   description: "List all saved pruning filters (name, URL pattern, rule counts).",

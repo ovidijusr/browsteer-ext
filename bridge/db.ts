@@ -29,10 +29,14 @@ db.exec(`
     element_count INTEGER
   );
 `);
+// Added later: JSON blob for Jev verdicts (find/pursue) — the threshold-tuning data.
+if (!db.query<{ name: string }, []>("PRAGMA table_info(actions)").all().some((c) => c.name === "detail")) {
+  db.exec("ALTER TABLE actions ADD COLUMN detail TEXT");
+}
 
 const insert = db.prepare(
-  `INSERT INTO actions (ts, tab_url, tool, ref, value, ok, error, element_count)
-   VALUES ($ts, $tab_url, $tool, $ref, $value, $ok, $error, $element_count)`
+  `INSERT INTO actions (ts, tab_url, tool, ref, value, ok, error, element_count, detail)
+   VALUES ($ts, $tab_url, $tool, $ref, $value, $ok, $error, $element_count, $detail)`
 );
 
 export interface ActionRecord {
@@ -43,6 +47,7 @@ export interface ActionRecord {
   ok: boolean;
   error?: string | null;
   element_count?: number | null;
+  detail?: unknown;
 }
 
 export function logAction(a: ActionRecord): void {
@@ -56,6 +61,7 @@ export function logAction(a: ActionRecord): void {
     $ok: a.ok ? 1 : 0,
     $error: a.error ?? null,
     $element_count: a.element_count ?? null,
+    $detail: a.detail == null ? null : JSON.stringify(a.detail),
   });
 }
 

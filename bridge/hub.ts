@@ -11,6 +11,7 @@
 //
 // All logging goes to STDERR (stdout is unused here, but keep the habit).
 import { logAction, upsertFilter, listFilters, deleteFilter } from "./db";
+import { THRESHOLDS, findTarget, guardClick, formatShortlist, pct, type Ranked } from "./jev";
 import type { ServerWebSocket } from "bun";
 
 const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
@@ -37,7 +38,7 @@ function newController(): Controller {
 }
 
 // Ops that can legitimately change the URL — drift after one of these is expected.
-const MAY_NAVIGATE = new Set(["navigate", "click", "press", "fill", "select"]);
+const MAY_NAVIGATE = new Set(["navigate", "click", "press", "fill", "select", "find", "pursue"]);
 // Ops whose payload is big enough that answering about the wrong page is a real cost.
 const HEAVY_READ = new Set(["snapshot", "html", "links"]);
 
@@ -98,6 +99,26 @@ function callExtension(ctl: Controller, op: string, params: Record<string, unkno
     pending.set(id, { resolve, reject, timer });
     sock.send(JSON.stringify({ id, op, params: sendParams }));
   });
+}
+
+// ── Jev helpers ───────────────────────────────────────────────────────────────
+// Uncollapsed so every repeated control keeps its own ref and name; text nodes
+// kept because targets are often described by nearby text. Retries briefly:
+// right after a click the content script may not be injected yet.
+async function jevSnapshot(ctl: Controller): Promise<any> {
+  let lastErr: any;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const r = await callExtension(ctl, "snapshot", { interactiveOnly: false, filters: listFilters(), chrome: true, collapse: false, dedup: true });
+      logAction({ tab_url: r.url, tool: "snapshot", ok: true, element_count: r.count, value: "jev" });
+      return r;
+    } catch (e) { lastErr = e; await Bun.sleep(700); }
+  }
+  throw lastErr;
+}
+async function hrefOf(ctl: Controller, cand: Ranked): Promise<string> {
+  if (cand.role !== "link") return "";
+  try { const r = await callExtension(ctl, "href", { ref: cand.ref }); return r?.href ?? ""; } catch { return ""; }
 }
 
 type Res = { text: string; isError?: boolean };
@@ -229,6 +250,79 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
       const trunc = buf.length > max ? `\n⚠ TRUNCATED at ${max} of ${buf.length} bytes — pass saveTo to get the whole body on disk.` : "";
       return (r.status < 400 ? ok : fail)(`${head}${trunc}\n${text}`);
     } catch (e: any) { logAction({ tool: "fetch", ok: false, error: e.message }); return fail(e.message); }
+
+    // ── Jev-powered targeting (bridge/jev.ts holds the questions + thresholds) ──
+    case "find": {
+      const target = String(p.target ?? "").trim();
+      if (!target) return fail("find: `target` is required (plain-language description of the element).");
+      try {
+        const snap = await jevSnapshot(ctl);
+        const refuse = driftRefusal(ctl, "snapshot", snap.url, prevMayNavigate);
+        if (refuse) { logAction({ tab_url: snap.url, tool: "find", value: target, ok: false, error: "drift refused" }); return fail(refuse); }
+        const r = await findTarget({ target, url: snap.url, title: snap.title, tree: snap.tree });
+        const top = r.ranked[0];
+        const detail = { target, exists: r.exists, confidence: r.confidence, top: r.ranked.slice(0, 3), tokens: r.inputTokens, requests: r.requests, model: r.model };
+        let header = `URL: ${snap.url}\nJev: ${r.candidates} candidates, exists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)} (${r.model}, ${r.inputTokens} tok)`;
+        header += maybeAutoPin(ctl, snap.tabId) + noteUrl(ctl, snap.url);
+        if (!top || r.exists < THRESHOLDS.exists) {
+          logAction({ tab_url: snap.url, tool: "find", value: target, ok: false, error: "no match", element_count: r.candidates, detail });
+          return fail(`${header}\nNothing on this page matches ${JSON.stringify(target)}. Closest guesses:\n${formatShortlist(r.ranked)}\nUse browser_snapshot to look yourself, or rephrase the target.`);
+        }
+        const href = await hrefOf(ctl, top);
+        const hrefLine = href ? `\n  → ${href}   (browser_navigate here to skip the click)` : "";
+        if (p.act === "click") {
+          if (r.confidence < THRESHOLDS.actConfidence) {
+            logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "shortlist:low-confidence" } });
+            return ok(`${header}\nNot clicking: confidence ${r.confidence.toFixed(2)} < ${THRESHOLDS.actConfidence}. Pick one yourself:\n${formatShortlist(r.ranked)}${hrefLine}`);
+          }
+          const g = await guardClick(top, target, snap.url);
+          if (g >= THRESHOLDS.guard) {
+            logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: g, outcome: "refused:guard" } });
+            return ok(`${header}\nRefusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: it may be irreversible (guard ${pct(g)}). Click it explicitly with browser_click if intended.\n${formatShortlist(r.ranked)}${hrefLine}`);
+          }
+          const c = await callExtension(ctl, "click", { ref: top.ref });
+          ctl.lastOpMayNavigate = true;
+          logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: g, outcome: "clicked" } });
+          return ok(`${header}\nClicked [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}, guard ${pct(g)}).${noteUrl(ctl, c?.url)}\nRunner-ups: ${r.ranked.slice(1, 3).map((x) => `[${x.ref}] ${JSON.stringify(x.name)} ${pct(x.p)}`).join(", ") || "none"}. Re-snapshot or browser_find again for the next step.`);
+        }
+        logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "shortlist" } });
+        return ok(`${header}\nBest match for ${JSON.stringify(target)}:\n${formatShortlist(r.ranked)}${hrefLine}\nbrowser_click({ref:${top.ref}}) to act, or pass act:"click" next time.`);
+      } catch (e: any) { logAction({ tool: "find", value: target, ok: false, error: e.message }); return fail(e.message); }
+    }
+    case "pursue": {
+      const goal = String(p.goal ?? "").trim();
+      const maxSteps = Math.min(Math.max(Number(p.maxSteps ?? 6), 1), 12);
+      if (!goal) return fail("pursue: `goal` is required.");
+      const trail: string[] = [];
+      let tokens = 0;
+      const done = async (verdict: string, url: string, tabId?: number) => {
+        // Hand back a compact view of where we stopped so the caller can continue.
+        let tail = "";
+        try { const s = await callExtension(ctl, "snapshot", { interactiveOnly: true, filters: listFilters(), chrome: true, collapse: true, dedup: true }); tail = `\n\nFinal page (interactive only, ${s.count} refs):\n${s.tree}`; } catch {}
+        logAction({ tab_url: url, tool: "pursue", value: goal, ok: true, element_count: trail.length, detail: { goal, verdict, trail, tokens } });
+        return ok(`${verdict}\nURL: ${url}\nTrail (${trail.length} step${trail.length === 1 ? "" : "s"}, ${tokens} Jev tokens):\n${trail.map((t, i) => `  ${i + 1}. ${t}`).join("\n") || "  (none)"}${maybeAutoPin(ctl, tabId)}${tail}`);
+      };
+      try {
+        for (let step = 1; step <= maxSteps; step++) {
+          const snap = await jevSnapshot(ctl);
+          const r = await findTarget({ target: goal, url: snap.url, title: snap.title, tree: snap.tree, pursue: true });
+          tokens += r.inputTokens;
+          const top = r.ranked[0];
+          if ((r.reached ?? 0) >= THRESHOLDS.reached) return done(`Goal reached (${pct(r.reached!)}) after ${step - 1} click${step === 2 ? "" : "s"}.`, snap.url, snap.tabId);
+          if ((r.blocked ?? 0) >= THRESHOLDS.blocked) return done(`Stopped: this page needs a human step (login/CAPTCHA/consent, ${pct(r.blocked!)}).`, snap.url, snap.tabId);
+          if (!top || r.exists < THRESHOLDS.exists || r.confidence < THRESHOLDS.stuck)
+            return done(`Stuck: no confident next step toward ${JSON.stringify(goal)} (exists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)}). Candidates:\n${formatShortlist(r.ranked)}`, snap.url, snap.tabId);
+          const g = await guardClick(top, goal, snap.url);
+          if (g >= THRESHOLDS.guard) return done(`Refusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: may be irreversible (guard ${pct(g)}). Do it explicitly with browser_click if intended.`, snap.url, snap.tabId);
+          await callExtension(ctl, "click", { ref: top.ref });
+          ctl.lastOpMayNavigate = true;
+          trail.push(`[${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}, conf ${r.confidence.toFixed(2)}) @ ${snap.url}`);
+          await Bun.sleep(1200);
+        }
+        const last = await jevSnapshot(ctl).catch(() => null);
+        return done(`Step limit (${maxSteps}) reached without a confident "goal reached" verdict.`, last?.url ?? ctl.lastUrl ?? "?", last?.tabId);
+      } catch (e: any) { logAction({ tool: "pursue", value: goal, ok: false, error: e.message, detail: { goal, trail, tokens } }); return fail(`${e.message}\nTrail so far:\n${trail.map((t, i) => `  ${i + 1}. ${t}`).join("\n")}`); }
+    }
     default: return fail(`Unknown op '${op}'`);
   }
 }

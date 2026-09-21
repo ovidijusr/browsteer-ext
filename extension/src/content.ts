@@ -9,7 +9,7 @@
 // `browser` is the global provided by @types/firefox-webext-browser.
 import {
   snapshot, collectLinks, getRef, clean, isVisible,
-  type Filter,
+  absoluteHref, type Filter,
 } from "./snapshot";
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -242,6 +242,7 @@ function handleOp(op: string, params: any): unknown {
       // Report whether the scoped element is still the one we were given.
       return { ...r, scoped: params?.ref != null };
     }
+    case "href": { const el = resolve(params.ref) as Element; return { url: location.href, href: absoluteHref(el, location.href) }; }
     case "click": return doClick(params.ref);
     case "fill": return doFill(params.ref, params.value);
     case "select": return doSelect(params.ref, params.value);
