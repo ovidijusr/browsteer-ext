@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <style>
     body { font: 13px -apple-system, system-ui, sans-serif; width: 260px; margin: 0; padding: 14px; color: #111; }
-    h1 { font-size: 13px; margin: 0 0 10px; color: #555; font-weight: 600; }
+    h1 { font-size: 13px; margin: 0 0 10px; color: #555; font-weight: 600; display: flex; justify-content: space-between; }
+    .ver { font-weight: 400; color: #999; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
     .key { font: 600 18px ui-monospace, Menlo, monospace; letter-spacing: .5px; background: #f3f4f6;
            border-radius: 8px; padding: 10px 12px; text-align: center; user-select: all; }
     .status { margin: 10px 0; font-size: 12px; }
@@ -19,7 +20,7 @@
   </style>
 </head>
 <body>
-  <h1>Browsteer</h1>
+  <h1>Browsteer <span class="ver" id="ver" title="manifest version (temporary add-ons show the checkout you loaded)"></span></h1>
   <div class="key" id="key">…</div>
   <div class="status"><span class="dot off" id="dot"></span><span id="statusText">checking…</span></div>
   <div class="row">

@@ -45,6 +45,9 @@ async function showLastPick() {
   }
 }
 
+// Version badge: tells you which build is loaded (dev reloads vs the signed xpi).
+$("ver").textContent = `v${browser.runtime.getManifest().version}`;
+
 refresh();
 showLastPick();
 setInterval(refresh, 1500);
