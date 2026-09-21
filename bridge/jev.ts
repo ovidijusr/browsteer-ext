@@ -20,7 +20,7 @@ export const THRESHOLDS = {
   reached: 0.8,       // pursue: goal already visible on the page → stop
   blocked: 0.5,       // pursue: login/captcha/consent wall → stop, needs a human
   stuck: 0.2,         // pursue: Choice confidence below this → stop and hand back. Low on purpose: a wrong hop is cheap and bounded (guard + step limit), a stop costs a Claude turn
-  willReach: 0.7,     // pursue: "the click itself lands on the goal" → skip the confirming round trip (72–78% on two correct cases)
+  willReach: 0.6,     // pursue: "the click itself lands on the goal" → skip the confirming round trip. Correct final hops scored 69–85% across 8 walks; 0.7 missed a 69% one and paid ~500 ms for a confirming snapshot+Jev
 } as const;
 
 // Guard is only asked when the candidate's name smells like a commitment. Links
