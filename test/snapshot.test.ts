@@ -3,7 +3,8 @@
 import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { listingPage, searchResultsPage } from "./fixtures";
-import { snapshot, collectLinks, factorUrls, accessibleName, type Filter } from "../extension/src/snapshot";
+import { snapshot, collectLinks, factorUrls, accessibleName, formReport, getRef, type Filter } from "../extension/src/snapshot";
+import { typeInto, editableIn } from "../extension/src/fallback";
 
 const LISTING_URL = "https://suchen.mobile.de/fahrzeuge/details.html?id=453073528";
 const SEARCH_URL = "https://suchen.mobile.de/fahrzeuge/search.html?vc=Car&sb=p";
@@ -283,5 +284,144 @@ describe("image-only control naming", () => {
 
   test("aria-label on the control itself keeps precedence", () => {
     expect(nameOf(`<a href="/z" aria-label="Home"><img alt="logo" src="z.png"></a>`)).toBe("Home");
+  });
+});
+
+// ANA signup (2026-10): submit stayed disabled; the snapshot showed checkboxes as
+// ="on" whatever their state and hid the real <select> behind a custom dropdown.
+describe("form state", () => {
+  const ANA = `<form id="registerForm">
+    <label for="last">Family/Last name</label><input id="last" name="apiNameEng" aria-required="true" value="REIPSLEGER">
+    <ul><li><input type="radio" name="apiDori" id="jp" value="JP"><label for="jp">Japan</label></li>
+        <li><input type="radio" name="apiDori" id="out" value="A" checked><label for="out">Outside of Japan</label></li></ul>
+    <div class="asw-form-select__inner">
+      <label tabindex="0" for="apiCountryDistrict">Country/Region</label>
+      <select id="apiCountryDistrict" name="apiCountryDistrict" style="display:none" required>
+        <option value="" selected disabled>Country/Region</option><option value="LT">LITHUANIA</option>
+      </select>
+    </div>
+    <div class="field"><label for="st">State/Prefecture</label><input id="st" name="apiCityNamOthers" value="Vilniaus m" maxlength="10">
+      <p role="alert">Half-width letters and digits only</p></div>
+    <label for="pw">Web password</label><input id="pw" type="password" name="apiWebPswd" value="secret123">
+    <input type="checkbox" id="agree" name="agreement" checked><label for="agree">I agree to the terms</label>
+    <input type="checkbox" id="pp" name="privacyPolicy"><label for="pp">I agree to the Privacy Policy</label>
+    <input type="submit" id="registerSubmit" value="Go to Confirmation" disabled>
+  </form>`;
+  const URL_ = "https://www.ana.co.jp/en/jp/amc/signup/";
+
+  test("snapshot shows *checked, not the meaningless value 'on'", () => {
+    const r = snapshot(docOf(ANA, URL_), { interactiveOnly: true });
+    const agree = lines(r.tree).find((l) => l.includes("I agree to the terms"))!;
+    const pp = lines(r.tree).find((l) => l.includes("Privacy Policy"))!;
+    expect(agree).toContain("*checked");
+    expect(agree).not.toContain('="on"');
+    expect(pp).not.toContain("*checked");
+    expect(lines(r.tree).find((l) => l.includes("Outside of Japan"))).toContain("*checked");
+  });
+
+  test("form report flags the empty hidden select, the error text and the disabled submit", () => {
+    const r = formReport(docOf(ANA, URL_));
+    const t = r.text;
+    expect(t).toContain("form#registerForm");
+    const country = t.split("\n").find((l) => l.includes("Country/Region"))!;
+    expect(country).toContain("nothing chosen");
+    expect(country).toContain("⚠ required but empty");
+    expect(country).toMatch(/open it via \[\d+\]/);
+    expect(t.split("\n").find((l) => l.includes("State/Prefecture"))).toContain('⚠ "Half-width letters and digits only"');
+    expect(t).toContain("maxlength=10");
+    expect(t).toMatch(/radio group \(apiDori\): .*Outside of Japan \*checked/);
+    expect(t.split("\n").find((l) => l.includes("Privacy Policy"))).toContain("unchecked");
+    expect(t).toContain("•••• (9 chars)");
+    expect(t).not.toContain("secret123");
+    expect(t).toMatch(/→ submit \[\d+\] "Go to Confirmation" \*disabled/);
+    expect(r.problems).toBe(2);
+  });
+
+  test("a field's error is not borrowed by its neighbour", () => {
+    const r = formReport(docOf(ANA, URL_));
+    expect(r.text.split("\n").find((l) => l.includes("Family/Last name"))).not.toContain("⚠");
+  });
+
+  test("refs from the form report resolve to the real controls", () => {
+    const doc = docOf(ANA, URL_);
+    const r = formReport(doc);
+    const ref = Number(r.text.split("\n").find((l) => l.includes("Country/Region"))!.match(/\[(\d+)\]/)![1]);
+    expect(getRef(ref)?.id).toBe("apiCountryDistrict");
+  });
+
+  test("hint fires when submit is disabled and nothing is flagged", () => {
+    const html = `<form><input name="a" value="x"><button disabled>Go</button></form>`;
+    expect(formReport(docOf(html, URL_)).text).toContain("page validates in JS");
+  });
+});
+
+describe("pointer-only controls", () => {
+  // usjticketing.com (Element Plus, 2026-10): the month arrow is a bare <img>, the
+  // day is a <div> inside a <td>; only `cursor: pointer` says they are clickable.
+  const page = `<body>
+    <style>.arrow { cursor: pointer } .cal .day:hover { cursor: pointer } .card { cursor: pointer }</style>
+    <p><img class="arrow" src="https://cdn.example/usj/image/right_arrows.png"><span>October 2026</span></p>
+    <table class="cal"><tr><td><div class="day"><p>15</p><p>9,400</p></div></td><td><div><p>16</p></div></td></tr></table>
+    <div class="card"><a href="/x">Real link</a> some card text</div>
+  </body>`;
+
+  test("a cursor:pointer <img> and a hover-only-pointer calendar day get refs, named from file name and text", () => {
+    const r = snapshot(docOf(page, "https://www.usjticketing.com/"), { interactiveOnly: true });
+    expect(r.tree).toContain('clickable "right_arrows"');
+    expect(r.tree).toContain('clickable "15 9,400"');
+    expect(r.tree).not.toContain('"16"');
+  });
+
+  test("a pointer wrapper around a real link stays a wrapper; the link keeps its ref", () => {
+    const r = snapshot(docOf(page, "https://www.usjticketing.com/"), { interactiveOnly: true });
+    expect(r.tree).toContain('link "Real link"');
+    expect(r.tree).not.toContain("some card text");
+  });
+
+  test("children inheriting the pointer cursor are not refs of their own", () => {
+    const r = snapshot(docOf(page, "https://www.usjticketing.com/"), { interactiveOnly: true });
+    expect(lines(r.tree).filter((l) => l.includes("clickable")).length).toBe(2);
+  });
+});
+
+describe("labels standing in for hidden radios", () => {
+  test("a pointer label whose radio is hidden becomes the clickable day", () => {
+    const doc = docOf(`<body><style>label { cursor: pointer } input.h { display: none }</style>
+      <table><tr><td><input class="h" type="radio" name="d" id="d17"><label for="d17">17</label></td></tr></table>
+      <input type="checkbox" id="ok"><label for="ok">I agree</label></body>`, "https://teamlabplanets.dmm.com/en/");
+    const r = snapshot(doc, { interactiveOnly: true });
+    expect(r.tree).toContain('clickable "17"');
+    expect(r.tree).not.toContain('clickable "I agree"');   // visible checkbox keeps its own ref
+  });
+});
+
+describe("open shadow roots", () => {
+  test("controls inside a web component's shadow tree get refs, slotted text shows once", () => {
+    const doc = docOf(`<body><my-field><span>Visitor name</span></my-field></body>`, "https://store.example/");
+    const host = doc.querySelector("my-field")!;
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `<label for="i">First name</label><input id="i"><slot></slot>`;
+    const r = snapshot(doc, {});
+    expect(r.tree).toContain('textbox "First name"');
+    expect(lines(r.tree).filter((l) => l.includes("Visitor name")).length).toBe(1);
+  });
+});
+
+describe("typing fallback", () => {
+  test("a custom-element host resolves to the input in its shadow root, and typed text sticks", () => {
+    const doc = docOf(`<body><gds-input></gds-input></body>`, "https://store.example/");
+    const host = doc.querySelector("gds-input")!;
+    host.attachShadow({ mode: "open" }).innerHTML = `<input id="fn">`;
+    const seen: string[] = [];
+    host.shadowRoot!.querySelector("input")!.addEventListener("input", (e: any) => seen.push(e.target.value));
+    expect(editableIn(host).id).toBe("fn");
+    const r = typeInto(host, "Augustina");
+    expect(r.stuck).toBe(true);
+    expect(seen.at(-1)).toBe("Augustina");
+  });
+
+  test("refuses a ref with no text field instead of typing into nothing", () => {
+    const doc = docOf(`<body><div id="d">x</div></body>`, "https://store.example/");
+    expect(() => editableIn(doc.getElementById("d")!)).toThrow(/no text field/);
   });
 });

@@ -32,6 +32,8 @@ type Sock = ServerWebSocket<SockData>;
 const browsers = new Map<string, Sock>(); // key → extension socket
 const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 let seq = 0;
+// alert()/confirm()/prompt() text the content script answered or saw; appended to the next reply.
+const dialogNotes: string[] = [];
 
 function newController(): Controller {
   return { activeKey: null, pinnedTabId: null, lastUrl: null, autoPinned: false, noAutoPin: false, lastOpMayNavigate: false };
@@ -40,7 +42,7 @@ function newController(): Controller {
 // Ops that can legitimately change the URL — drift after one of these is expected.
 const MAY_NAVIGATE = new Set(["navigate", "click", "press", "fill", "select", "find", "pursue"]);
 // Ops whose payload is big enough that answering about the wrong page is a real cost.
-const HEAVY_READ = new Set(["snapshot", "html", "links"]);
+const HEAVY_READ = new Set(["snapshot", "html", "links", "form"]);
 
 function noteUrl(ctl: Controller, url?: string): string {
   if (!url) return "";
@@ -93,9 +95,11 @@ function callExtension(ctl: Controller, op: string, params: Record<string, unkno
   let sock: Sock;
   try { sock = targetSocket(ctl); } catch (e) { return Promise.reject(e); }
   const id = `${op}-${++seq}`;
-  const sendParams = ctl.pinnedTabId != null && op !== "tabs" ? { ...params, tabId: ctl.pinnedTabId } : params;
+  // An explicit tabId in the call (CLI, scripts) beats the controller's pin — a fresh
+  // controller auto-pins to whatever tab is focused, which sent CLI ops to the wrong tab.
+  const sendParams = ctl.pinnedTabId != null && op !== "tabs" && params.tabId == null ? { ...params, tabId: ctl.pinnedTabId } : params;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Extension timed out after ${timeoutMs}ms on '${op}'`)); }, timeoutMs);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Extension timed out after ${timeoutMs}ms on '${op}'. If the page opened a confirm()/prompt() box it is waiting for an answer: answer it in the browser, or call browser_dialogs({confirm:"accept"|"dismiss"}) and redo the action.`)); }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
     sock.send(JSON.stringify({ id, op, params: sendParams }));
   });
@@ -132,8 +136,8 @@ async function maybeGuard(cand: Ranked, goal: string, url: string): Promise<{ g:
 // 150 ms quiet made 270–600 ms per hop the largest chunk of a pursue. A page
 // that never reacts (dead click) still returns at NOREACT_MS.
 const QUIET_MS = 60, POLL_MS = 40, NOREACT_MS = 500;
-async function settledClick(ctl: Controller, ref: number, maxMs = 1500): Promise<any> {
-  const r = await callExtension(ctl, "click", { ref });
+async function settledClick(ctl: Controller, ref: number | { x: number; y: number }, maxMs = 1500): Promise<any> {
+  const r = await callExtension(ctl, "click", typeof ref === "number" ? { ref } : ref);
   ctl.lastOpMayNavigate = true;
   if (!r?.pulse) { await Bun.sleep(600); return { ...r, settled: { settledMs: 600, urlChanged: false, unloading: false, fallback: true } }; } // old content script
   const t0 = performance.now(); const startUrl = r.url;
@@ -149,9 +153,14 @@ async function settledClick(ctl: Controller, ref: number, maxMs = 1500): Promise
     if (reacted && performance.now() - lastChange >= QUIET_MS) break;
     if (!reacted && performance.now() - t0 >= NOREACT_MS) break;
   }
-  return { url, settled: { settledMs: Math.round(performance.now() - t0), urlChanged: url !== startUrl, unloading, reacted } };
+  return { url, hit: r.hit, settled: { settledMs: Math.round(performance.now() - t0), urlChanged: url !== startUrl, unloading, reacted } };
 }
 const fmtSettle = (r: any) => r?.settled ? ` settled ${r.settled.settledMs} ms${r.settled.unloading ? ", full navigation" : r.settled.urlChanged ? ", URL changed" : ""}` : "";
+// A click the page ignored is the moment to escalate — say so once, cheaply, instead
+// of letting the caller re-snapshot and retry the same dead ref.
+const deadClickHint = (r: any) => r?.settled && !r.settled.reacted && !r.settled.urlChanged && !r.settled.unloading && !r.settled.fallback
+  ? "\n⚠ Nothing on the page changed. If this should have done something: browser_scan (what is really on screen, any widget) → browser_click({x,y}) on the right box; for text fields browser_fill({ref, value, type:true})."
+  : "";
 async function hrefOf(ctl: Controller, cand: Ranked): Promise<string> {
   if (cand.role !== "link") return "";
   try { const r = await callExtension(ctl, "href", { ref: cand.ref }); return r?.href ?? ""; } catch { return ""; }
@@ -223,8 +232,48 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         return ok(`${header}\n\n${body || "no links found"}`);
       } catch (e: any) { logAction({ tool: "links", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
     }
-    case "click": try { const r = p.settle === 0 ? await callExtension(ctl, "click", { ref: p.ref }) : await settledClick(ctl, p.ref, p.settle ?? 800); logAction({ tab_url: r?.url, tool: "click", ref: p.ref, ok: true }); return ok(`Clicked [${p.ref}].${fmtSettle(r)} Re-snapshot to see the result.${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "click", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
-    case "fill": try { const r = await callExtension(ctl, "fill", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: true }); return ok(`Filled [${p.ref}] with ${JSON.stringify(p.value)}.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
+    case "form": {
+      try {
+        const r = await callExtension(ctl, "form", { ref: p.ref });
+        const refuse = driftRefusal(ctl, "form", r.url, prevMayNavigate);
+        if (refuse) return fail(refuse);
+        logAction({ tab_url: r.url, tool: "form", ref: p.ref ?? null, ok: true, element_count: r.count });
+        let header = `URL: ${r.url}\nFields: ${r.count} · flagged: ${r.problems}${p.ref != null ? ` — scoped to [${p.ref}]` : ""}\nRefs below replace the previous snapshot's refs.`;
+        header += maybeAutoPin(ctl, r.tabId);
+        header += noteUrl(ctl, r.url);
+        return ok(`${header}\n\n${r.text}`);
+      } catch (e: any) { logAction({ tool: "form", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
+    }
+    case "click": try {
+      const target = p.ref == null && p.x != null && p.y != null ? { x: p.x, y: p.y } : p.ref;
+      if (target == null) return fail("click: pass a ref, or x and y (viewport px from browser_scan).");
+      const r = p.settle === 0 ? await callExtension(ctl, "click", typeof target === "number" ? { ref: target } : target) : await settledClick(ctl, target, p.settle ?? 800);
+      const what = typeof target === "number" ? `[${target}]` : `(${target.x}, ${target.y})${r?.hit ? ` → ${r.hit}` : ""}`;
+      logAction({ tab_url: r?.url, tool: "click", ref: typeof target === "number" ? target : null, value: typeof target === "number" ? undefined : `${target.x},${target.y}`, ok: true });
+      return ok(`Clicked ${what}.${fmtSettle(r)} Re-snapshot to see the result.${deadClickHint(r)}${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`);
+    } catch (e: any) { logAction({ tool: "click", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
+    case "fill": try {
+      if (p.type) {
+        const r = await callExtension(ctl, "type", { ref: p.ref, value: p.value, commit: p.commit });
+        logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: r.stuck, detail: { how: r.how } });
+        return ok(`Typed into [${p.ref}] ${r.field} via ${r.how}: value now ${JSON.stringify(r.value)}${r.stuck ? "" : " ⚠ differs from what was typed"}.${noteUrl(ctl, r?.url)}`);
+      }
+      const r = await callExtension(ctl, "fill", { ref: p.ref, value: p.value });
+      logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: true });
+      return ok(`Filled [${p.ref}] with ${JSON.stringify(p.value)}.${noteUrl(ctl, r?.url)}`);
+    } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
+    case "scan": try {
+      const r = await callExtension(ctl, "scan", { ref: p.ref, step: p.step, limit: p.limit });
+      const refuse = driftRefusal(ctl, "scan", r.url, prevMayNavigate);
+      if (refuse) return fail(refuse);
+      logAction({ tab_url: r.url, tool: "scan", ref: p.ref ?? null, ok: true, element_count: r.count });
+      const header = `URL: ${r.url}\nScan: ${r.count} on-screen targets in ${r.area}${r.truncated ? " (limit hit — scope with ref or raise limit)" : ""}. Refs replace the previous snapshot's; @x,y is the box centre for browser_click({x,y}).${maybeAutoPin(ctl, r.tabId)}${noteUrl(ctl, r.url)}`;
+      return ok(`${header}\n\n${r.tree}`);
+    } catch (e: any) { logAction({ tool: "scan", ok: false, error: e.message }); return fail(e.message); }
+    case "dialogs": try {
+      const r = await callExtension(ctl, "dialogs", { confirm: p.confirm, prompt: p.prompt });
+      return ok(`Next confirm(): ${r.policy.confirm}${r.policy.prompt != null ? ` · next prompt() answers ${JSON.stringify(r.policy.prompt)}` : ""} (one-shot).${r.seen.length ? `\nSeen: ${r.seen.join(" · ")}` : ""}`);
+    } catch (e: any) { return fail(e.message); }
     case "select": try { const r = await callExtension(ctl, "select", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "select", ref: p.ref, value: p.value, ok: true }); return ok(`Selected "${r.selected}" in [${p.ref}].${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "select", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "options": try { const r = await callExtension(ctl, "options", { ref: p.ref }); logAction({ tool: "options", ref: p.ref, ok: true }); return ok(r.options.join("\n")); } catch (e: any) { return fail(e.message); }
     case "read": try { const r = await callExtension(ctl, "read", { ref: p.ref }); logAction({ tab_url: r?.url, tool: "read", ref: p.ref, ok: true }); return ok(r.text ?? ""); } catch (e: any) { logAction({ tool: "read", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
@@ -269,7 +318,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
     } catch (e: any) { return fail(e.message); }
     case "fetch": try {
       const method = (p.method ?? "GET").toUpperCase();
-      const r = await callExtension(ctl, "fetch", { url: p.url, headers: p.headers ?? {}, method, body: p.body }, 120_000);
+      const r = await callExtension(ctl, "fetch", { url: p.url, headers: p.headers ?? {}, method, body: p.body, fromPage: p.fromPage === true, tabId: p.tabId }, 120_000);
       const buf = Buffer.from(r.bodyBase64 ?? "", "base64");
       const isText = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded)|.*\+(json|xml))/i.test(r.contentType ?? "");
       let head = `HTTP ${r.status} ${r.contentType || "(no content-type)"} ${buf.length} bytes` + (r.finalUrl && r.finalUrl !== p.url ? `\n→ ${r.finalUrl}` : "");
@@ -393,7 +442,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         }
         const c = await timed("act", () => settledClick(ctl, top.ref));
         logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: asked ? g : "skipped", outcome: "clicked", settled: c?.settled } });
-        return ok(`${header}\nClicked [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}${asked ? `, guard ${pct(g)}` : ""}).${fmtSettle(c)}${noteUrl(ctl, c?.url)}\nRunner-ups: ${r.ranked.slice(1, 3).map((x) => `[${x.ref}] ${JSON.stringify(x.name)} ${pct(x.p)}`).join(", ") || "none"}. browser_find again for the next step.`);
+        return ok(`${header}\nClicked [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}${asked ? `, guard ${pct(g)}` : ""}).${fmtSettle(c)}${deadClickHint(c)}${noteUrl(ctl, c?.url)}\nRunner-ups: ${r.ranked.slice(1, 3).map((x) => `[${x.ref}] ${JSON.stringify(x.name)} ${pct(x.p)}`).join(", ") || "none"}. browser_find again for the next step.`);
       } catch (e: any) { logAction({ tool: "find", value: targets.join(" | "), ok: false, error: e.message, detail: { ms } }); return fail(e.message); }
     }
     // ── Scripted sequence: several find/fill/press/navigate/pursue steps in ONE
@@ -521,8 +570,8 @@ if (process.argv.includes("--stop")) {
           if (msg.type === "shutdown") { console.error("[hub] shutdown requested"); process.exit(0); }
           if (msg.type === "register" && typeof msg.key === "string") { ws.data.role = "extension"; ws.data.key = msg.key; browsers.set(msg.key, ws); console.error(`[hub] browser registered: ${msg.key}`); return; }
           if (msg.type === "hello" && msg.role === "control") { ws.data.role = "control"; ws.data.ctl = newController(); console.error("[hub] controller connected"); return; }
-          if (ws.data.role === "extension") { const pr = pending.get(msg.id); if (!pr) return; clearTimeout(pr.timer); pending.delete(msg.id); if (msg.ok) pr.resolve(msg.result); else pr.reject(new Error(msg.error ?? "unknown extension error")); return; }
-          if (ws.data.role === "control" && typeof msg.op === "string") { execOp(ws.data.ctl!, msg.op, msg.params ?? {}).then((r) => { try { ws.send(JSON.stringify({ id: msg.id, ok: !r.isError, text: r.text })); } catch {} }); return; }
+          if (ws.data.role === "extension") { const pr = pending.get(msg.id); if (!pr) return; clearTimeout(pr.timer); pending.delete(msg.id); if (msg.ok) { if (Array.isArray(msg.result?._dialogs)) dialogNotes.push(...msg.result._dialogs); pr.resolve(msg.result); } else pr.reject(new Error(msg.error ?? "unknown extension error")); return; }
+          if (ws.data.role === "control" && typeof msg.op === "string") { execOp(ws.data.ctl!, msg.op, msg.params ?? {}).then((r) => { const text = dialogNotes.length ? `${r.text}\n⚠ Page dialog${dialogNotes.length > 1 ? "s" : ""}: ${dialogNotes.splice(0).join(" · ")}` : r.text; try { ws.send(JSON.stringify({ id: msg.id, ok: !r.isError, text })); } catch {} }); return; }
         },
         close(ws) {
           if (ws.data.role === "extension" && ws.data.key && browsers.get(ws.data.key) === ws) { browsers.delete(ws.data.key); console.error(`[hub] browser disconnected: ${ws.data.key}`); }

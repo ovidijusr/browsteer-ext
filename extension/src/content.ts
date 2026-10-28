@@ -8,9 +8,14 @@
 //
 // `browser` is the global provided by @types/firefox-webext-browser.
 import {
-  snapshot, collectLinks, getRef, clean, isVisible,
+  snapshot, collectLinks, formReport, getRef, clean, isVisible,
   absoluteHref, type Filter,
 } from "./snapshot";
+import {
+  scan, clickAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks,
+} from "./fallback";
+
+installDialogHooks(window);
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 function resolve(ref: number): Element {
@@ -37,12 +42,33 @@ function doClick(ref: number) {
   const el = resolve(ref) as HTMLElement;
   el.scrollIntoView({ block: "center" });
   const before = mutations;
-  el.click();
+  const r = el.getBoundingClientRect();
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  realClick(hitTarget(el, x, y), x, y);
   return { url: location.href, mutations: before, pulse: true };
 }
 
+// A real click lands on the innermost element under the pointer and bubbles up.
+// Dispatching on the ref itself skips handlers bound to its children: the
+// usjticketing.com calendar ref is the outer day box, but Vue's @click sits on
+// the inner .dateCell, so the day looked selected and "Add to cart" stayed
+// disabled (2026-10). Hit-test the centre and use that element when it lies
+// inside the ref; an overlay covering the ref is not what the caller meant.
+function hitTarget(el: HTMLElement, x: number, y: number): HTMLElement {
+  const hit = document.elementFromPoint(x, y);
+  return hit instanceof HTMLElement && el.contains(hit) ? hit : el;
+}
+
+function doClickAt(x: number, y: number) {
+  const before = mutations;
+  const r = clickAt(document, x, y);
+  return { url: location.href, mutations: before, pulse: true, hit: r.hit };
+}
+
 function doFill(ref: number, value: string) {
-  const el = resolve(ref) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+  const ref0 = resolve(ref);
+  // A custom-element host (<gds-input>, <my-field>) is not the field; the input inside it is.
+  const el = (ref0 instanceof HTMLSelectElement ? ref0 : editableIn(ref0)) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
   el.focus();
   // Use the native value setter so React/Vue/etc. detect the change.
   const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -85,12 +111,36 @@ function doOptions(ref: number) {
 function doRead(ref: number) {
   const el = resolve(ref);
   let text = "";
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+  if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) {
+    // `value` is "on" either way — the state is what the caller is asking about.
+    text = `${el.checked ? "checked" : "unchecked"}${el.value && el.value !== "on" ? ` (value ${el.value})` : ""}`;
+  } else if (el instanceof HTMLSelectElement) {
+    const opt = el.options[el.selectedIndex];
+    text = opt ? `${clean(opt.text)}${opt.value ? ` (value ${opt.value})` : " (no value — placeholder)"}` : "";
+  } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     text = el.value;
   } else {
     text = clean(el.textContent);
   }
   return { url: location.href, text };
+}
+
+// fetch AS THE PAGE: Firefox's `content.fetch` carries the page's Origin/Referer, so
+// same-origin APIs that reject extension-origin requests (Booking's /dml/graphql → 403)
+// answer normally. The background `fetch` op stays the default for cross-origin reads.
+async function pageFetch(p: any) {
+  const w: any = globalThis as any;
+  const method = String(p.method ?? "GET").toUpperCase();
+  const init = { method, credentials: "include", headers: p.headers ?? {}, body: method === "GET" || method === "HEAD" ? undefined : p.body };
+  // Objects handed to the page's fetch must live in the page compartment (cloneInto), else
+  // "Permission denied to access property 'constructor'". Read the body as text — a page-side
+  // ArrayBuffer is just as unreachable. (Text-only is fine: this op exists for page APIs.)
+  const res = w.content?.fetch && w.cloneInto ? await w.content.fetch(String(p.url), w.cloneInto(init, window)) : await fetch(String(p.url), init as RequestInit);
+  const txt: string = await res.text();
+  const bytes = new TextEncoder().encode(txt);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000) as unknown as number[]);
+  return { status: res.status, contentType: String(res.headers.get("content-type") ?? ""), finalUrl: String(res.url), size: bytes.length, bodyBase64: btoa(bin) };
 }
 
 // Escape hatch: raw HTML when the a11y snapshot flattens away needed detail.
@@ -255,8 +305,18 @@ function handleOp(op: string, params: any): unknown {
       // Report whether the scoped element is still the one we were given.
       return { ...r, scoped: params?.ref != null };
     }
+    case "form": {
+      const root = params?.ref != null ? (resolve(params.ref) as Element) : undefined;
+      return formReport(document, { root });
+    }
     case "href": { const el = resolve(params.ref) as Element; return { url: location.href, href: absoluteHref(el, location.href) }; }
-    case "click": return doClick(params.ref);
+    case "click": return params?.ref == null && params?.x != null ? doClickAt(params.x, params.y) : doClick(params.ref);
+    case "scan": {
+      const root = params?.ref != null ? (resolve(params.ref) as Element) : undefined;
+      return scan(document, { root, step: params?.step, limit: params?.limit });
+    }
+    case "type": return { url: location.href, ...typeInto(resolve(params.ref), String(params.value ?? ""), { commit: !!params.commit }) };
+    case "dialogs": return { url: location.href, policy: setDialogPolicy({ confirm: params?.confirm, prompt: params?.prompt }), seen: drainDialogs() };
     case "pulse": return pulse();
     case "fill": return doFill(params.ref, params.value);
     case "select": return doSelect(params.ref, params.value);
@@ -265,6 +325,7 @@ function handleOp(op: string, params: any): unknown {
     case "html": return doHtml(params.ref, params.clean ?? true, params.up ?? 0, params.offset ?? 0, params.maxBytes ?? 50_000);
     case "press": return doPress(params.key, params.ref);
     case "pick": return startPicker(); // returns a Promise (waits for the user)
+    case "pageFetch": return pageFetch(params);
     default: throw new Error(`Unknown op '${op}'`);
   }
 }
@@ -278,7 +339,12 @@ browser.runtime.onMessage.addListener(
     // handleOp may return a value or a Promise (pick waits for a click) — await both.
     Promise.resolve()
       .then(() => handleOp(msg.op, msg.params))
-      .then((result) => sendResponse({ ok: true, result }))
+      .then((result) => {
+        // alert() text raised by this op (or since the last one) rides back with any reply.
+        const seen = msg.op === "dialogs" ? [] : drainDialogs();
+        if (seen.length && result && typeof result === "object") (result as any)._dialogs = seen;
+        sendResponse({ ok: true, result });
+      })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message ?? e) }));
     return true; // async response
   }

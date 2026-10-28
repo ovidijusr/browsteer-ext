@@ -141,6 +141,7 @@ function connect() {
         ws?.send(JSON.stringify({ id: req.id, ok: true, result: { requests: out, total: list.length, now: Date.now() } }));
         return;
       }
+      if (req.op === "fetch" && req.params?.fromPage) req.op = "pageFetch"; // run in the tab, as the page
       if (req.op === "fetch") {
         const method = String(req.params.method ?? "GET").toUpperCase();
         const res = await fetch(String(req.params.url), {

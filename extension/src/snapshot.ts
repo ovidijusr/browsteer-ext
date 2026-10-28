@@ -21,6 +21,11 @@ export function getRef(ref: number): Element | undefined {
   return refMap.get(ref);
 }
 
+/** Replace the ref table with a plain list (refs 1..n) — used by the visual scan. */
+export function setRefs(els: Element[]): void {
+  refMap = new Map(els.map((el, i) => [i + 1, el] as [number, Element]));
+}
+
 // ── Roles ────────────────────────────────────────────────────────────────────
 const IMPLICIT_ROLE: Record<string, string> = {
   A: "link", BUTTON: "button", SELECT: "combobox", TEXTAREA: "textbox",
@@ -98,7 +103,10 @@ export function clean(s: string | null | undefined): string {
 }
 
 export function accessibleName(el: Element): string {
-  const doc = el.ownerDocument;
+  // Ids and label[for] resolve inside the element's own tree — a shadow root
+  // when the control lives in a web component.
+  const root = el.getRootNode() as Document;
+  const doc = typeof root.getElementById === "function" ? root : el.ownerDocument;
   // 1. aria-labelledby → concatenated text of referenced nodes
   const labelledby = el.getAttribute("aria-labelledby");
   if (labelledby) {
@@ -181,12 +189,17 @@ export function stateOf(el: Element): string {
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
     const ctl = el as HTMLInputElement;
     const isBtn = tag === "INPUT" && /^(submit|button|reset)$/.test(ctl.type);
+    const isCheck = tag === "INPUT" && (ctl.type === "checkbox" || ctl.type === "radio");
     const v = clean(ctl.value);
-    if (v && !isBtn) parts.push(`=${JSON.stringify(v.slice(0, 80))}`);
+    // A checkbox's value is "on" whether or not it is ticked — printing it reads
+    // like a state (ANA signup, 2026-10). Only the live `checked` property counts.
+    if (v && !isBtn && !(isCheck && v === "on")) parts.push(`=${JSON.stringify(v.slice(0, 80))}`);
+    if (isCheck && ctl.checked) parts.push("*checked");
     if (ctl.disabled) parts.push("*disabled");
   }
   for (const a of ["aria-expanded", "aria-selected", "aria-checked", "aria-current"]) {
     const v = el.getAttribute(a);
+    if (a === "aria-checked" && parts.includes("*checked")) continue;
     if (v && v !== "false") parts.push(`*${a.replace("aria-", "")}${v === "true" ? "" : "=" + v}`);
   }
   return parts.length ? " " + parts.join(" ") : "";
@@ -194,7 +207,93 @@ export function stateOf(el: Element): string {
 
 /** Actionable = worth a ref (click/fill targets). Text/containers get no ref. */
 function isInteractive(el: Element, role: string): boolean {
-  return INTERACTIVE_ROLES.has(role) || el.hasAttribute("onclick") || el.getAttribute("tabindex") === "0";
+  return INTERACTIVE_ROLES.has(role) || el.hasAttribute("onclick") || el.getAttribute("tabindex") === "0"
+    || isPointerClickable(el);
+}
+
+// ── Pointer-only controls ────────────────────────────────────────────────────
+// Framework widgets often make a bare <img>, <td> or <div> clickable with an
+// addEventListener the content script cannot see (usjticketing.com's Element
+// Plus calendar, 2026-10: month arrows are <img>, day cells are <td>; neither
+// had a role, so the date picker had no refs at all). The one signal the page
+// does expose is `cursor: pointer`. Only the element where the pointer *starts*
+// counts (cursor is inherited, so its children say pointer too), and a wrapper
+// that already contains real controls stays a wrapper — a clickable card must
+// not swallow the links inside it.
+export const REAL_CONTROL_SEL =
+  "a[href], button, input, select, textarea, [role=button], [role=link], [role=checkbox], [role=radio], [role=tab], [role=option], [role=menuitem]";
+
+export function cursorOf(el: Element | null): string {
+  const win = el?.ownerDocument?.defaultView;
+  if (!el || !win) return "";
+  try { return win.getComputedStyle(el).cursor; } catch { return ""; }
+}
+
+// Many kits only set the pointer on hover (Element Plus: `.el-calendar-day:hover
+// { cursor: pointer }`), so at snapshot time the computed cursor is "auto" for
+// every day except the one under the mouse. Read the stylesheets once per
+// snapshot for `:hover` rules that set a pointer and test the selector without
+// the `:hover`. Cross-origin sheets refuse cssRules and are skipped.
+let hoverPointerSels: string[] = [];
+/** Re-read the `:hover { cursor: pointer }` rules (snapshot and scan both call it). */
+export function refreshPointerRules(doc: Document): void { hoverPointerSels = collectHoverPointer(doc); }
+
+function collectHoverPointer(doc: Document): string[] {
+  const out: string[] = [];
+  const visit = (rules: CSSRuleList | undefined) => {
+    for (const rule of Array.from(rules ?? [])) {
+      const r = rule as CSSStyleRule & { cssRules?: CSSRuleList };
+      if (r.selectorText && r.style?.cursor === "pointer" && r.selectorText.includes(":hover")) {
+        for (const part of r.selectorText.split(",")) {
+          if (!part.includes(":hover")) continue;
+          const sel = part.replace(/:hover/g, "").trim();
+          if (sel && !/[>+~]$/.test(sel)) out.push(sel);
+        }
+      } else if (r.cssRules) visit(r.cssRules);              // @media / @supports / @layer
+    }
+  };
+  for (const sheet of Array.from(doc.styleSheets ?? [])) {
+    try { visit((sheet as CSSStyleSheet).cssRules); } catch { /* cross-origin */ }
+  }
+  return out;
+}
+
+export function hasPointer(el: Element | null): boolean {
+  if (!el) return false;
+  return cursorOf(el) === "pointer" || hoverPointerSels.some((sel) => safeMatches(el, sel));
+}
+
+export function isPointerClickable(el: Element): boolean {
+  if (el.tagName === "BODY" || el.tagName === "HTML") return false;
+  // A <label> normally just names its control, which already has a ref. Date
+  // pickers often hide the radio and style the label as the day (teamLab Planets'
+  // calendar, 2026-10: `<input type=radio hidden><label for>17</label>`), and then
+  // the label is the only thing on screen to click.
+  if (el.tagName === "LABEL") {
+    const ctl = (el as HTMLLabelElement).control;
+    if (!ctl || isVisible(ctl)) return false;
+  }
+  if (INTERACTIVE_ROLES.has(roleOf(el))) return false;
+  if (!hasPointer(el) || hasPointer(el.parentElement)) return false;
+  if (el.closest(REAL_CONTROL_SEL)) return false;      // inside a control we already ref
+  return !el.querySelector(REAL_CONTROL_SEL);           // a wrapper around real controls
+}
+
+// A pointer-only control has no accessible name by definition; borrow its text,
+// then an image's alt/title, then the image file's basename ("right_arrows").
+export function pointerName(el: Element): string {
+  // Text nodes joined with spaces: textContent glues block children together,
+  // so a calendar day <p>15</p><p>9,400</p> would read "159,400".
+  const parts: string[] = [];
+  const tw = el.ownerDocument.createTreeWalker(el, 4 /* SHOW_TEXT */);
+  for (let t = tw.nextNode(); t; t = tw.nextNode()) parts.push(t.textContent ?? "");
+  const text = clean(parts.join(" ")).slice(0, 120);
+  if (text) return text;
+  const fromChildren = descendantLabel(el);
+  if (fromChildren) return fromChildren;
+  const img = el.tagName === "IMG" ? el : el.querySelector("img");
+  const src = img?.getAttribute("src") ?? "";
+  return src.split(/[?#]/)[0].split("/").pop()?.replace(/\.[a-z0-9]+$/i, "") ?? "";
 }
 
 // ── Visibility ───────────────────────────────────────────────────────────────
@@ -214,6 +313,7 @@ function hasLayout(doc: Document | null | undefined): boolean {
 
 export function isVisible(el: Element): boolean {
   if (el.getAttribute("aria-hidden") === "true") return false;
+  if (el.tagName === "SLOT") return true; // no box of its own; its assigned nodes are judged one by one
   const doc = el.ownerDocument;
   const win = doc?.defaultView;
   if (win) {
@@ -236,6 +336,7 @@ function classify(el: Element, role: string): Decision {
   if (role === "presentation" || role === "none") return "transparent";
   if (INTERACTIVE_ROLES.has(role) || STRUCTURAL_ROLES.has(role)) return "emit";
   if (el.hasAttribute("onclick") || el.getAttribute("tabindex") === "0") return "emit";
+  if (isPointerClickable(el)) return "emit";
   return "transparent";
 }
 
@@ -548,6 +649,21 @@ function extractRows(filter: Filter, root: ParentNode, baseHref: string): { tree
   return { tree: lines.join("\n"), count: items.length };
 }
 
+// ── Shadow DOM ───────────────────────────────────────────────────────────────
+// What is on screen for a host with an open shadow root is its shadow tree, with
+// the light children shown only where a <slot> places them. Walking childNodes
+// alone made every web-component control (<gds-input>, <sl-button>…) invisible.
+// Closed roots stay closed — no API reaches them.
+function renderedChildren(node: Node): Node[] {
+  const el = node as Element;
+  if (el.shadowRoot) return Array.from(el.shadowRoot.childNodes);
+  if (el.tagName === "SLOT") {
+    const assigned = (el as HTMLSlotElement).assignedNodes?.({ flatten: true }) ?? [];
+    return assigned.length ? assigned : Array.from(el.childNodes);
+  }
+  return Array.from(node.childNodes);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 export function snapshot(doc: Document, opts: SnapshotOpts = {}): SnapshotResult {
   const interactiveOnly = !!opts.interactiveOnly;
@@ -555,6 +671,7 @@ export function snapshot(doc: Document, opts: SnapshotOpts = {}): SnapshotResult
   const useCollapse = opts.collapse !== false;
   const useDedup = opts.dedup !== false;
   const baseHref = doc.defaultView?.location?.href ?? doc.baseURI ?? "";
+  refreshPointerRules(doc);
 
   const filter = pickFilter(opts.filters ?? [], baseHref);
   const dropSel = filter?.drop ?? [];
@@ -588,7 +705,7 @@ export function snapshot(doc: Document, opts: SnapshotOpts = {}): SnapshotResult
   const tree: TNode = { kind: "el", children: [] };
 
   const walk = (node: Node, into: TNode) => {
-    for (const child of Array.from(node.childNodes)) {
+    for (const child of renderedChildren(node)) {
       if (child.nodeType === 3 /* TEXT_NODE */) {
         if (interactiveOnly) continue;
         const t = clean(child.textContent);
@@ -608,10 +725,12 @@ export function snapshot(doc: Document, opts: SnapshotOpts = {}): SnapshotResult
       if (decision !== "emit") { walk(el, into); continue; } // transparent wrapper
       const interactive = isInteractive(el, role);
       if (interactiveOnly && !interactive) { walk(el, into); continue; }
-      const name = accessibleName(el);
+      const pointer = interactive && !INTERACTIVE_ROLES.has(role) && isPointerClickable(el);
+      const name = accessibleName(el) || (pointer ? pointerName(el) : "");
       const n: TNode = {
-        kind: "el", role, name, state: stateOf(el), el, interactive,
-        leafByName: NAME_IS_CONTENT.has(role) && !!name,
+        kind: "el", role: pointer && (!role || role === "img" || role === "cell") ? "clickable" : role,
+        name, state: stateOf(el), el, interactive,
+        leafByName: (NAME_IS_CONTENT.has(role) || pointer) && !!name,
         children: [],
       };
       into.children.push(n);
@@ -679,4 +798,180 @@ export function collectLinks(
     suffix,
     links: kept.map((l, i) => ({ text: l.text, url: mids[i] ?? l.href })),
   };
+}
+
+// ── browser_form ─────────────────────────────────────────────────────────────
+// "Why is the submit button disabled?" in one call. The a11y snapshot is the
+// wrong tool for that: it hides invisible controls (the real <select> behind a
+// custom dropdown), shows a checkbox's value instead of its state, and carries
+// every paragraph of the terms text. This lists only the controls, with the
+// live state a validator reads — value, checked, chosen option, required — and
+// the error text the page put next to each one. Refs are reassigned (like a
+// snapshot), so a field can be filled straight from this output.
+export interface FormResult {
+  url: string;
+  count: number;
+  text: string;
+  problems: number;
+}
+
+const FIELD_SEL = "input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]), select, textarea";
+const SUBMIT_SEL = "button:not([type]), button[type=submit], input[type=submit], input[type=image]";
+const ERROR_SEL = "[role=alert], [aria-live], [class*=error], [class*=Error], [class*=invalid], [class*=Invalid]";
+
+function isEmptyField(el: Element): boolean {
+  if (el.tagName === "SELECT") {
+    const s = el as HTMLSelectElement;
+    const opt = s.options[s.selectedIndex];
+    return !opt || opt.value === "" || opt.disabled;
+  }
+  const i = el as HTMLInputElement;
+  if (i.type === "checkbox") return !i.checked;
+  if (i.type === "radio") {
+    const form = i.form ?? i.ownerDocument;
+    return !Array.from(form.querySelectorAll(`input[type=radio][name="${cssEscape(i.name)}"]`))
+      .some((r) => (r as HTMLInputElement).checked);
+  }
+  return clean(i.value) === "";
+}
+
+/** Error text the page rendered for this control: aria-errormessage/describedby,
+ *  native validationMessage, and alert/error nodes in the control's own field
+ *  container — walking up only while the ancestor holds no OTHER control, so a
+ *  neighbour's error is never borrowed. */
+function fieldErrors(el: Element): string[] {
+  const doc = el.ownerDocument;
+  const out = new Set<string>();
+  for (const attr of ["aria-errormessage", "aria-describedby"]) {
+    for (const id of (el.getAttribute(attr) ?? "").split(/\s+/).filter(Boolean)) {
+      const t = clean(doc.getElementById(id)?.textContent);
+      if (t && (attr === "aria-errormessage" || el.getAttribute("aria-invalid") === "true")) out.add(t);
+    }
+  }
+  const ctl = el as HTMLInputElement;
+  // valueMissing is already reported as "required but empty".
+  if (ctl.validity && !ctl.validity.valid && !ctl.validity.valueMissing && ctl.validationMessage) out.add(clean(ctl.validationMessage));
+  const name = el.getAttribute("name");
+  let box: Element | null = el.parentElement;
+  for (let up = 0; box && up < 4; up++, box = box.parentElement) {
+    const others = Array.from(box.querySelectorAll(FIELD_SEL)).filter(
+      (c) => c !== el && !(name && c.getAttribute("name") === name),
+    );
+    if (others.length) break;
+    for (const e of Array.from(box.querySelectorAll(ERROR_SEL))) {
+      if (e.querySelector(FIELD_SEL) || !isVisible(e)) continue;
+      const t = clean(e.textContent);
+      if (t) out.add(t.slice(0, 160));
+    }
+  }
+  return [...out];
+}
+
+function describeField(el: Element, ref: number, proxyRef: (el: Element) => number | null): { line: string; problem: boolean } {
+  const doc = el.ownerDocument;
+  const role = roleOf(el) || el.tagName.toLowerCase();
+  const ctl = el as HTMLInputElement;
+  const name = accessibleName(el) || clean(el.getAttribute("name") || ctl.id);
+  const parts: string[] = [`[${ref}] ${role} "${name}"`];
+  const id = el.getAttribute("name") || ctl.id;
+  if (id && !name.includes(id)) parts.push(`(${id})`);
+
+  if (el.tagName === "SELECT") {
+    const s = el as unknown as HTMLSelectElement;
+    const opt = s.options[s.selectedIndex];
+    if (isEmptyField(el)) parts.push(`= nothing chosen${opt ? ` (placeholder ${JSON.stringify(clean(opt.text))})` : ""}`);
+    else parts.push(`= ${JSON.stringify(clean(opt!.text))}${opt!.value !== clean(opt!.text) ? ` [${opt!.value}]` : ""}`);
+  } else if (ctl.type === "checkbox" || ctl.type === "radio") {
+    parts.push(ctl.checked ? "*checked" : "unchecked");
+  } else if (ctl.type === "password") {
+    parts.push(ctl.value ? `= •••• (${ctl.value.length} chars)` : "= empty");
+  } else {
+    parts.push(ctl.value ? `= ${JSON.stringify(ctl.value.slice(0, 80))}` : "= empty");
+  }
+
+  const required = ctl.required || el.getAttribute("aria-required") === "true";
+  if (required) parts.push("*required");
+  if (ctl.disabled) parts.push("*disabled");
+  if (ctl.readOnly) parts.push("*readonly");
+  for (const a of ["maxlength", "minlength", "pattern", "min", "max"]) {
+    const v = el.getAttribute(a);
+    if (v) parts.push(`${a}=${v.length > 40 ? v.slice(0, 40) + "…" : v}`);
+  }
+  if (el.tagName === "INPUT" && !/^(text|checkbox|radio|password)$/.test(ctl.type)) parts.push(`type=${ctl.type}`);
+
+  if (!isVisible(el)) {
+    // The real control is hidden behind a custom widget. Point at what the user
+    // actually clicks: a visible <label for=id> or an element that aria-controls it.
+    const proxy = (ctl.id && doc.querySelector(`label[for="${cssEscape(ctl.id)}"]`)) || null;
+    const pr = proxy && isVisible(proxy) ? proxyRef(proxy) : null;
+    parts.push(pr != null ? `(hidden — page shows a custom widget, open it via [${pr}]; browser_select/fill [${ref}] sets the real control)` : "(hidden)");
+  }
+
+  const errs = fieldErrors(el);
+  const invalid = el.getAttribute("aria-invalid") === "true" || (ctl.validity && !ctl.validity.valid && !ctl.validity.valueMissing);
+  const emptyRequired = required && isEmptyField(el);
+  if (emptyRequired) parts.push("⚠ required but empty");
+  if (invalid && !errs.length) parts.push("⚠ invalid");
+  for (const e of errs) parts.push(`⚠ ${JSON.stringify(e)}`);
+  return { line: parts.join(" "), problem: emptyRequired || !!invalid || errs.length > 0 };
+}
+
+export function formReport(doc: Document, opts: { root?: Element } = {}): FormResult {
+  const baseHref = doc.defaultView?.location?.href ?? doc.baseURI ?? "";
+  const scope: ParentNode = opts.root ?? doc.body;
+  refMap = new Map();
+  let ref = 0;
+  const give = (el: Element) => { refMap.set(++ref, el); return ref; };
+
+  // Group controls by their form so a page with a search box and a signup form
+  // reads as two blocks, not one interleaved list.
+  const groups = new Map<Element | null, Element[]>();
+  for (const el of Array.from(scope.querySelectorAll(FIELD_SEL))) {
+    const f = (el as HTMLInputElement).form ?? null;
+    if (!groups.has(f)) groups.set(f, []);
+    groups.get(f)!.push(el);
+  }
+  // Radio groups appear once per name: one line per radio would be noise, but the
+  // *checked one must be visible, so the line lists every option.
+  const lines: string[] = [];
+  let problems = 0;
+  let count = 0;
+  for (const [form, els] of groups) {
+    const label = form ? `form${form.id ? "#" + form.id : ""}${form.getAttribute("name") ? ` name=${form.getAttribute("name")}` : ""}` : "(controls outside any <form>)";
+    lines.push(label);
+    const before = problems;
+    const seenRadio = new Set<string>();
+    for (const el of els) {
+      const ctl = el as HTMLInputElement;
+      if (ctl.type === "radio" && ctl.name) {
+        if (seenRadio.has(ctl.name)) continue;
+        seenRadio.add(ctl.name);
+        const radios = els.filter((r) => (r as HTMLInputElement).type === "radio" && (r as HTMLInputElement).name === ctl.name) as HTMLInputElement[];
+        const opts = radios.map((r) => `[${give(r)}] ${accessibleName(r) || r.value}${r.checked ? " *checked" : ""}`);
+        const required = radios.some((r) => r.required || r.getAttribute("aria-required") === "true");
+        const none = !radios.some((r) => r.checked);
+        let line = `  radio group (${ctl.name}): ${opts.join(" | ")}`;
+        if (none) line += required ? " ⚠ required but none chosen" : " — none chosen";
+        if (none && required) problems++;
+        lines.push(line);
+        count += radios.length;
+        continue;
+      }
+      const r = give(el);
+      const d = describeField(el, r, give);
+      if (d.problem) problems++;
+      lines.push("  " + d.line);
+      count++;
+    }
+    const submitScope: ParentNode = form ?? scope;
+    for (const b of Array.from(submitScope.querySelectorAll(SUBMIT_SEL))) {
+      if (!form && (b as HTMLButtonElement).form) continue;
+      const btn = b as HTMLButtonElement;
+      lines.push(`  → submit [${give(b)}] "${accessibleName(b) || clean(b.textContent)}"${btn.disabled ? " *disabled" : ""}${isVisible(b) ? "" : " (hidden)"}`);
+      if (btn.disabled && problems === before) {
+        lines.push("    ⚠ submit is disabled but no field is flagged: the page validates in JS. Compare each value with its on-page hint (allowed characters, length), or find the validator in the page's scripts.");
+      }
+    }
+  }
+  return { url: baseHref, count, problems, text: lines.join("\n") || "no form controls found" };
 }

@@ -79,6 +79,8 @@ tool("browser_snapshot", {
     "as `=\"value\"`, `*disabled`, `*selected`, etc. Refs are valid ONLY until the " +
     "next navigation/snapshot — re-snapshot after each action. Set interactiveOnly " +
     "to drop all text and return just the actionable refs (cheapest; for pure action steps). " +
+    "`[N] clickable \"…\"` is a pointer-only control (an <img>/<div>/<td> with cursor:pointer and no role, " +
+    "e.g. calendar days and month arrows), named from its text or image file name; click it like a button. " +
     "A saved pruning filter whose URL pattern matches is applied automatically (chrome removed). " +
     "Three reductions also run by default and are reported in the header so you can audit them: " +
     "runs of 5+ look-alike sibling controls collapse to one ranged line `[13-43] button \"Weiter 1…31\" ×31 collapsed` " +
@@ -106,16 +108,76 @@ tool("browser_links", {
   },
 });
 
+tool("browser_form", {
+  title: "Inspect form state",
+  description:
+    "List every form control with the live state a validator reads — value, *checked, the chosen option of a " +
+    "<select> (or 'nothing chosen'), *required, maxlength/pattern, *disabled — plus the error text the page shows " +
+    "next to each field and each submit button's *disabled state. Includes hidden controls behind custom widgets " +
+    "(the real <select> under a styled dropdown) and points at the visible widget. Passwords are masked. " +
+    "Use it when a submit button stays disabled or a form won't advance: one call instead of snapshot + html " +
+    "digging. Refs are reassigned (they replace the last snapshot's), so you can browser_fill/browser_select straight from it.",
+  inputSchema: {
+    ref: z.number().int().optional().describe("Scope to this element's subtree (e.g. one form). Omit for every control on the page."),
+  },
+});
+
 tool("browser_click", {
   title: "Click element",
-  description: "Click the element with the given [ref] from the latest snapshot.",
-  inputSchema: { ref: z.number().int().describe("Element ref from browser_snapshot"), settle: z.number().int().min(0).max(5000).optional().describe("Max ms to wait for the page to react (URL change / DOM quiet / unload) before returning; default 800, 0 = return immediately") },
+  description:
+    "Click the element with the given [ref] from the latest snapshot/scan (a real-shaped click: pointer/mouse " +
+    "down+up on the innermost element at its centre, then click). Or pass x,y instead of ref to click whatever " +
+    "is on top at that viewport point (coordinates from browser_scan) — for canvas, overlays, anything without a ref. " +
+    "If the reply says nothing changed, escalate to browser_scan rather than retrying the same ref.",
+  inputSchema: {
+    ref: z.number().int().optional().describe("Element ref from browser_snapshot or browser_scan"),
+    x: z.number().optional().describe("Viewport x in CSS px (with y, instead of ref)"),
+    y: z.number().optional().describe("Viewport y in CSS px"),
+    settle: z.number().int().min(0).max(5000).optional().describe("Max ms to wait for the page to react (URL change / DOM quiet / unload) before returning; default 800, 0 = return immediately"),
+  },
 });
 
 tool("browser_fill", {
   title: "Fill input",
-  description: "Type a value into the textbox/textarea/select with the given [ref].",
-  inputSchema: { ref: z.number().int().describe("Element ref from browser_snapshot"), value: z.string().describe("Text to enter") },
+  description:
+    "Put a value into the textbox/textarea/select with the given [ref] (a custom-element host such as <gds-input> " +
+    "resolves to the input inside it). Default is a fast value-set. Set type:true when a form ignores the filled " +
+    "value (validation says empty, a duplicate/empty-name error, the model kept the old text): it types the way " +
+    "a keyboard does (execCommand insertText, else per-key events) and reports whether the value stuck.",
+  inputSchema: {
+    ref: z.number().int().describe("Element ref from browser_snapshot"),
+    value: z.string().describe("Text to enter"),
+    type: z.boolean().optional().describe("Keyboard-style typing fallback (slower, works with framework-bound fields)"),
+    commit: z.boolean().optional().describe("With type:true, blur the field afterwards (fires blur/focusout validators)"),
+  },
+});
+
+tool("browser_scan", {
+  title: "Visual scan (fallback)",
+  description:
+    "FALLBACK for when browser_snapshot/find don't show or can't operate a control. Hit-tests a grid over the " +
+    "viewport (or one [ref]'s box) and lists every distinct thing actually on screen — declared or not: bare " +
+    "<img>/<div>/<td> widgets, labels for hidden inputs, open shadow-DOM content — as `[N] tag.class \"text\" " +
+    "@x,y WxH (flags)`. Refs work with browser_click/fill/read; @x,y works with browser_click({x,y}). " +
+    "Costs more tokens than a snapshot: use it after a failure, scoped with ref when you can.",
+  inputSchema: {
+    ref: z.number().int().optional().describe("Scan only this element's box (scrolled into view first) — e.g. a dialog or calendar"),
+    step: z.number().int().min(6).max(80).optional().describe("Grid spacing in px (default 16; smaller finds tinier targets)"),
+    limit: z.number().int().min(10).max(400).optional().describe("Max targets listed (default 120)"),
+  },
+});
+
+tool("browser_dialogs", {
+  title: "Answer page dialogs",
+  description:
+    "alert() boxes are answered automatically and their text is appended to the next reply (⚠ Page dialog…). " +
+    "confirm()/prompt() stay native — the tab waits for a person — unless you set an answer for the NEXT one " +
+    "here (one-shot). Use it when an action timed out because the page asked a question, or before clicking " +
+    "something you know will ask. Also returns dialog text seen since the last call.",
+  inputSchema: {
+    confirm: z.enum(["native", "accept", "dismiss"]).optional().describe("How to answer the next confirm()"),
+    prompt: z.string().nullable().optional().describe("Text to answer the next prompt() with (null = native)"),
+  },
 });
 
 tool("browser_select", {
@@ -135,7 +197,7 @@ tool("browser_options", {
 
 tool("browser_read", {
   title: "Read element",
-  description: "Read the text/value of a single element by [ref] without a full snapshot — cheap way to extract one field.",
+  description: "Read the text/value of a single element by [ref] without a full snapshot — cheap way to extract one field. Checkboxes/radios return checked/unchecked; a <select> returns its chosen option text (and value).",
   inputSchema: { ref: z.number().int().describe("Element ref from browser_snapshot") },
 });
 
@@ -162,6 +224,7 @@ tool("browser_fetch", {
     headers: z.record(z.string()).optional().describe("Extra request headers, e.g. {Accept:'application/json'}"),
     method: z.enum(["GET", "POST", "PUT", "PATCH"]).optional().describe("Default GET. Use another verb ONLY to replay a request the page itself fired (seen via browser_requests) — never to probe unknown endpoints with the user's session."),
     body: z.string().optional().describe("Request body for non-GET replays (raw string; set Content-Type in headers)"),
+    fromPage: z.boolean().optional().describe("Run the request inside the pinned/active tab AS the page (page Origin + cookies). Use when a same-origin API 403s from the extension context (e.g. Booking /dml/graphql). The tab must be on that site."),
   },
 });
 

@@ -87,7 +87,10 @@ clipboard. Paste it into Claude Code and add a task:
 The `/browse` skill calls `browser_pair(key)`, then drives the page with
 `browser_snapshot` / `browser_click` / `browser_fill` / `browser_read`. Refs
 come from the latest snapshot and are invalid after navigation — re-snapshot
-after each action.
+after each action. For a form that won't submit, `browser_form` lists every
+control's live state (value, `*checked`, chosen option, required, error text,
+hidden `<select>`s behind custom dropdowns) and each submit's `*disabled` in one
+call.
 
 ### Pairing model
 
