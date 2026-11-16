@@ -327,7 +327,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
       if (r.truncated) header = `⚠ TRUNCATED — returned bytes ${r.offset}–${r.offset + r.returned} of ${r.total} total. This is NOT the whole element — page more with offset:${r.offset + r.returned}, or (better for list pages) use browser_snapshot / an extraction filter instead of raw HTML.\n` + header;
       return ok(`${header}${noteUrl(ctl, r?.url)}\n\n${r.html}`);
     } catch (e: any) { logAction({ tool: "html", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
-    case "tabs": try { const r = await callExtension(ctl, "tabs"); const txt = r.tabs.map((t: any) => `[${t.tabId}]${t.active ? " *active" : ""}  ${t.title ?? ""}\n      ${t.url ?? ""}`).join("\n"); return ok(txt || "no tabs"); } catch (e: any) { return fail(e.message); }
+    case "tabs": try { const r = await callExtension(ctl, "tabs"); const txt = r.tabs.map((t: any) => `[${t.tabId}]${t.active ? " *active" : ""}  ${t.title ?? ""}\n      ${t.url ?? ""}`).join("\n"); const hidden = r.hidden ? `\n(${r.hidden} other tab${r.hidden === 1 ? " is" : "s are"} on sites the user has not allowed; they are not listed.)` : ""; return ok((txt || "no tabs on allowed sites") + hidden); } catch (e: any) { return fail(e.message); }
     case "pin":
       if (p.tabId == null) {
         // Explicit unpin is a decision — don't quietly auto-pin again afterwards.

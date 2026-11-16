@@ -9,13 +9,44 @@
 import { ext } from "./ext";
 import {
   snapshot, collectLinks, formReport, getRef, clean, isVisible,
-  absoluteHref, type Filter,
+  absoluteHref, accessibleName, roleOf, type Filter,
 } from "./snapshot";
+import { needsGuard } from "./risk";
 import {
-  scan, clickAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks,
+  scan, clickAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks, touchDialogs,
 } from "./fallback";
 
 installDialogHooks(window);
+
+// ── "Claude is working here" ─────────────────────────────────────────────────
+// A bar across the top of the tab while requests are arriving, so it is never a
+// surprise that the page is being read or operated. It lives in a closed shadow
+// root on <html>: page styles cannot hide it, page scripts cannot read it, and
+// showing or hiding it does not count as a change to the page.
+const working = (() => {
+  let bar: HTMLElement | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const host = document.createElement("browsteer-working");
+    host.setAttribute("aria-hidden", "true");
+    host.style.cssText = "all:initial;position:fixed;inset:0 0 auto 0;height:0;z-index:2147483647;pointer-events:none";
+    const root = host.attachShadow({ mode: "closed" });
+    bar = document.createElement("div");
+    bar.style.cssText = "display:none;height:3px;background:#2447e0;box-shadow:0 0 0 1px rgba(255,255,255,.7)";
+    const tag = document.createElement("div");
+    tag.textContent = "Claude is working in this tab";
+    tag.style.cssText = "position:absolute;top:3px;right:12px;padding:3px 9px 4px;border-radius:0 0 7px 7px;background:#2447e0;color:#fff;font:600 11px/1.3 system-ui,sans-serif";
+    bar.append(tag);
+    root.append(bar);
+    document.documentElement.append(host);
+  } catch {}
+  return () => {
+    if (!bar) return;
+    bar.style.display = "block";
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { if (bar) bar.style.display = "none"; }, 4000);
+  };
+})();
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 function resolve(ref: number): Element {
@@ -38,8 +69,20 @@ function pulse() {
   return { url: location.href, mutations, ready: document.readyState };
 }
 
-function doClick(ref: number) {
+// browser_click is the one way to press something without a second opinion, so
+// controls that sound like a commitment need the caller to state that the user
+// agreed (confirm: true). The words are in ./risk.ts.
+function guardClick(el: Element | null, confirm: boolean): void {
+  if (confirm || !el) return;
+  const control = el.closest("a, button, input, select, [role=button], [role=link], [role=menuitem], [role=tab]") ?? el;
+  const name = accessibleName(control) || clean(control.textContent).slice(0, 60);
+  if (!name || !needsGuard({ role: roleOf(control), name })) return;
+  throw new Error(`“${name}” sounds like an action that cannot be undone, so it was not clicked. Ask the user; if they agree, repeat with browser_click({ ref, confirm: true }).`);
+}
+
+function doClick(ref: number, confirm = false) {
   const el = resolve(ref) as HTMLElement;
+  guardClick(el, confirm);
   el.scrollIntoView({ block: "center" });
   const before = mutations;
   const r = el.getBoundingClientRect();
@@ -59,7 +102,8 @@ function hitTarget(el: HTMLElement, x: number, y: number): HTMLElement {
   return hit instanceof HTMLElement && el.contains(hit) ? hit : el;
 }
 
-function doClickAt(x: number, y: number) {
+function doClickAt(x: number, y: number, confirm = false) {
+  guardClick(document.elementFromPoint(x, y), confirm);
   const before = mutations;
   const r = clickAt(document, x, y);
   return { url: location.href, mutations: before, pulse: true, hit: r.hit };
@@ -117,6 +161,9 @@ function doRead(ref: number) {
   } else if (el instanceof HTMLSelectElement) {
     const opt = el.options[el.selectedIndex];
     text = opt ? `${clean(opt.text)}${opt.value ? ` (value ${opt.value})` : " (no value — placeholder)"}` : "";
+  } else if (el instanceof HTMLInputElement && el.type === "password") {
+    // Never hand a password to the bridge; whether it is filled in is enough to work with.
+    text = el.value ? `(password field, ${el.value.length} characters, hidden)` : "(password field, empty)";
   } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     text = el.value;
   } else {
@@ -150,14 +197,12 @@ async function pageFetch(p: any) {
 function doHtml(ref: number | undefined, stripNoise = true, up = 0, offset = 0, maxBytes = 50_000) {
   let el = (ref != null ? resolve(ref) : document.documentElement) as HTMLElement;
   for (let i = 0; i < up && el.parentElement; i++) el = el.parentElement; // climb to a container
-  let html: string;
-  if (stripNoise) {
-    const clone = el.cloneNode(true) as HTMLElement;
-    clone.querySelectorAll("script,style,noscript,svg,link,template,iframe").forEach((n) => n.remove());
-    html = clone.outerHTML;
-  } else {
-    html = el.outerHTML;
-  }
+  // Always a clone: a password a server pre-filled into the markup is blanked first.
+  const clone = el.cloneNode(true) as HTMLElement;
+  if (stripNoise) clone.querySelectorAll("script,style,noscript,svg,link,template,iframe").forEach((n) => n.remove());
+  const pw = clone.matches?.("input[type=password]") ? [clone] : Array.from(clone.querySelectorAll("input[type=password][value]"));
+  for (const n of pw) if (n.hasAttribute("value")) n.setAttribute("value", "••••");
+  const html = clone.outerHTML;
   const total = html.length;
   const slice = html.slice(offset, offset + maxBytes);
   return {
@@ -312,7 +357,7 @@ function handleOp(op: string, params: any): unknown {
       return formReport(document, { root });
     }
     case "href": { const el = resolve(params.ref) as Element; return { url: location.href, href: absoluteHref(el, location.href) }; }
-    case "click": return params?.ref == null && params?.x != null ? doClickAt(params.x, params.y) : doClick(params.ref);
+    case "click": return params?.ref == null && params?.x != null ? doClickAt(params.x, params.y, params.confirm === true) : doClick(params.ref, params.confirm === true);
     case "scan": {
       const root = params?.ref != null ? (resolve(params.ref) as Element) : undefined;
       return scan(document, { root, step: params?.step, limit: params?.limit });
@@ -338,6 +383,9 @@ void isVisible;
 ext.runtime.onMessage.addListener(
   (msg: any, _sender: unknown, sendResponse: (r: unknown) => void) => {
     if (!msg || typeof msg.op !== "string") return false; // not for us (e.g. popup msgs)
+    // Only the background relays ops; a message from anywhere else is not one.
+    if ((_sender as any)?.id !== ext.runtime.id || (_sender as any)?.tab) return false;
+    if (msg.op !== "pick") { working(); touchDialogs(); }
     // handleOp may return a value or a Promise (pick waits for a click) — await both.
     Promise.resolve()
       .then(() => handleOp(msg.op, msg.params))
