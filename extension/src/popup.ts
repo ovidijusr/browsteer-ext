@@ -1,52 +1,51 @@
-// Popup: shows this browser's pairing key + live connection status, with
-// Copy and Regenerate. Talks to the background event page over runtime messaging.
+// Popup: this browser's pairing key, whether the local bridge is connected, and
+// the two things people do here — copy the /browse command and pick an element.
+import { ext } from "./ext";
+import { command, copyWithFeedback, getStatus, renderKey, renderLink } from "./keyview";
 
 const $ = (id: string) => document.getElementById(id)!;
+let key = "";
 
 async function refresh() {
-  const r: any = await browser.runtime.sendMessage({ type: "getStatus" });
-  $("key").textContent = r.key;
-  $("hintKey").textContent = r.key;
-  ($("dot") as HTMLElement).className = "dot " + (r.connected ? "on" : "off");
-  $("statusText").textContent = r.connected ? "paired with Claude bridge" : "waiting for Claude bridge…";
+  const s = await getStatus();
+  if (!s) return;
+  key = s.key;
+  renderKey($("key"), s.key);
+  renderLink($("link"), $("linkText"), s.connected,
+    "Bridge not running.", "It starts with Claude Code; this reconnects by itself.");
 }
 
-// Copy the ready-to-paste slash command: "/browse <key> " (trailing space so you
-// just type the task). Clicking the key itself does the same.
-async function copyCommand() {
-  const key = $("key").textContent ?? "";
-  await navigator.clipboard.writeText(`/browse ${key} `);
-  const btn = $("copy") as HTMLButtonElement;
-  btn.textContent = "Copied /browse ✓";
-  setTimeout(() => (btn.textContent = "Copy /browse command"), 1300);
-}
-$("copy").addEventListener("click", copyCommand);
-$("key").addEventListener("click", copyCommand);
-($("key") as HTMLElement).style.cursor = "pointer";
-($("key") as HTMLElement).title = "Click to copy “/browse <key>”";
+// Copies "/browse <key> " with a trailing space, ready for the task to be typed after it.
+$("copy").addEventListener("click", () => key && copyWithFeedback($("copy"), command(key)));
+$("key").addEventListener("click", () => key && copyWithFeedback($("copy"), command(key)));
 
 $("regen").addEventListener("click", async () => {
-  const r: any = await browser.runtime.sendMessage({ type: "regenerate" });
-  $("key").textContent = r.key;
-  $("hintKey").textContent = r.key;
+  const r = (await ext.runtime.sendMessage({ type: "regenerate" })) as { key: string };
+  key = r.key;
+  renderKey($("key"), r.key);
+  const btn = $("regen");
+  btn.textContent = "New key set";
+  setTimeout(() => { btn.textContent = "New key"; }, 1400);
 });
 
-// Element picker: trigger on the page, then close the popup so the user can click.
+// Element picker: starts on the page, so the popup closes to get out of the way.
 $("pick").addEventListener("click", async () => {
-  await browser.runtime.sendMessage({ type: "startPick" });
+  await ext.runtime.sendMessage({ type: "startPick" });
   window.close();
 });
 
-// Show the last picked selector (so you can copy it into a filter).
+// The last picked selector, kept so it can be copied into a filter later.
 async function showLastPick() {
-  const { lastPick } = await browser.storage.local.get("lastPick");
-  if (lastPick?.selector) {
-    $("lastpick").textContent = `last pick: ${lastPick.selector} · ${lastPick.matchCount}×`;
-  }
+  const { lastPick } = await ext.storage.local.get("lastPick");
+  if (!lastPick?.selector) return;
+  const el = $("picked");
+  const code = document.createElement("code");
+  code.textContent = lastPick.selector;
+  el.replaceChildren("Last picked: ", code, ` (${lastPick.matchCount} on the page)`);
+  el.hidden = false;
 }
 
-// Version badge: tells you which build is loaded (dev reloads vs the signed xpi).
-$("ver").textContent = `v${browser.runtime.getManifest().version}`;
+$("ver").textContent = `v${ext.runtime.getManifest().version}`;
 
 refresh();
 showLastPick();

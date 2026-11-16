@@ -1,35 +1,35 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <style>
-    body { font: 13px -apple-system, system-ui, sans-serif; width: 260px; margin: 0; padding: 14px; color: #111; }
-    h1 { font-size: 13px; margin: 0 0 10px; color: #555; font-weight: 600; display: flex; justify-content: space-between; }
-    .ver { font-weight: 400; color: #999; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-    .key { font: 600 18px ui-monospace, Menlo, monospace; letter-spacing: .5px; background: #f3f4f6;
-           border-radius: 8px; padding: 10px 12px; text-align: center; user-select: all; }
-    .status { margin: 10px 0; font-size: 12px; }
-    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
-    .on { background: #16a34a; } .off { background: #d1d5db; }
-    .row { display: flex; gap: 8px; margin-top: 10px; }
-    button { flex: 1; font: 12px inherit; padding: 7px; border: 1px solid #d1d5db; border-radius: 7px;
-             background: #fff; cursor: pointer; }
-    button:hover { background: #f9fafb; }
-    .hint { margin-top: 12px; font-size: 11px; color: #888; line-height: 1.4; }
-    code { background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
-  </style>
+  <title>Browsteer</title>
+  <link rel="stylesheet" href="ui.css" />
 </head>
-<body>
-  <h1>Browsteer <span class="ver" id="ver" title="manifest version (temporary add-ons show the checkout you loaded)"></span></h1>
-  <div class="key" id="key">…</div>
-  <div class="status"><span class="dot off" id="dot"></span><span id="statusText">checking…</span></div>
-  <div class="row">
-    <button id="copy">Copy /browse command</button>
-    <button id="regen">Regenerate</button>
+<body class="popup">
+  <header>
+    <img src="icons/48.png" alt="" />
+    <span>Browsteer</span>
+    <span class="ver" id="ver" title="Installed version"></span>
+  </header>
+
+  <button class="key" id="key" type="button" title="Copy the /browse command"><span>bst</span><span>····</span><span>····</span></button>
+
+  <p class="link" id="link" data-state="boot" role="status">
+    <span class="lamp" aria-hidden="true"></span>
+    <span id="linkText">Checking the bridge…</span>
+  </p>
+
+  <div class="actions">
+    <button class="btn primary" id="copy" type="button">Copy /browse command</button>
+    <button class="btn" id="regen" type="button" title="Replace this browser's key. The old key stops working.">New key</button>
   </div>
-  <div class="hint">In Claude Code: <code>/browse <span id="hintKey">key</span> &lt;task&gt;</code></div>
-  <div class="row"><button id="pick">🎯 Pick element scope</button></div>
-  <div class="hint" id="lastpick"></div>
-  <script src="./dist/popup.js"></script>
+
+  <footer>
+    <button class="btn quiet" id="pick" type="button" title="Click any element on the page to get its CSS selector">Pick an element</button>
+    <a href="welcome.html" target="_blank" rel="noopener">Setup and privacy</a>
+  </footer>
+  <p class="picked" id="picked" hidden></p>
+
+  <script src="popup.js"></script>
 </body>
 </html>

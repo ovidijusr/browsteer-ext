@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Set up Browsteer</title>
+  <link rel="icon" href="icons/32.png" />
+  <link rel="stylesheet" href="ui.css" />
+</head>
+<body>
+  <main class="page">
+    <div class="brand"><img src="icons/48.png" alt="" /> Browsteer <span class="ver" id="ver"></span></div>
+
+    <h1>Claude Code can now work in this browser, once you hand it this key</h1>
+    <p class="lede">The key names this browser. Claude Code can only reach it through a bridge
+      running on this computer, and only after you paste the key into a session.</p>
+
+    <section class="berth" aria-label="This browser's pairing key">
+      <button class="key" id="key" type="button" title="Copy the /browse command"><span>bst</span><span>····</span><span>····</span></button>
+      <p class="link" id="link" data-state="boot" role="status">
+        <span class="lamp" aria-hidden="true"></span>
+        <span id="linkText">Checking the bridge…</span>
+      </p>
+    </section>
+
+    <h2>Set it up</h2>
+    <ol class="steps">
+      <li id="step-bridge">
+        <h3>Add the bridge to Claude Code</h3>
+        <p>Run this once in a terminal, from the folder where you cloned Browsteer. It needs
+          <a href="https://bun.sh" rel="noopener">Bun</a> 1.3 or newer.</p>
+        <div class="cmd"><code id="cmd-add">bun install &amp;&amp; claude mcp add -s user browsteer -- bun run "$(pwd)/bridge/mcp.ts"</code><button class="btn" type="button" data-copy="cmd-add">Copy</button></div>
+      </li>
+      <li id="step-start">
+        <h3>Start Claude Code</h3>
+        <p>The bridge starts with the first session and keeps running. The lamp above turns
+          green when this browser has found it; there is nothing to click here.</p>
+      </li>
+      <li id="step-pair">
+        <h3>Give Claude the key and a task</h3>
+        <p>Paste this into Claude Code and finish the sentence. You can get it again any time
+          from the Browsteer button in the toolbar.</p>
+        <div class="cmd"><code id="cmd-browse">/browse bst-····-···· summarise the page I have open</code><button class="btn" type="button" data-copy="cmd-browse">Copy</button></div>
+      </li>
+    </ol>
+
+    <h2>What it can see, and where that goes</h2>
+    <p>While paired, Claude Code can read and operate any normal web page in this browser,
+      using the sessions you are signed in to. Treat the key like access to this browser profile.</p>
+    <table class="facts">
+      <tr><th scope="row">Page content</th><td>Sent only to the bridge at <code>127.0.0.1:8787</code> on this computer, and only when Claude Code asks for it. The extension itself contacts no server.</td></tr>
+      <tr><th scope="row">Claude</th><td>What the bridge returns becomes part of your Claude Code conversation, under the same terms as anything else you show Claude.</td></tr>
+      <tr><th scope="row">Semantic targeting</th><td>Off unless you turn it on in the bridge. When on, an outline of the current page goes to TypeSafe to locate controls by description.</td></tr>
+      <tr><th scope="row">Request log</th><td>The address, method and submitted form data of the last 300 requests pages made are kept in memory, so Claude can find a page's own API. It is never written to disk and clears when the browser restarts.</td></tr>
+      <tr><th scope="row">Stored in the browser</th><td>The pairing key and the last element you picked. Nothing else.</td></tr>
+      <tr><th scope="row">Dialogs</th><td>A page's <code>alert()</code> boxes are answered automatically and their text is passed to Claude. Confirm and prompt dialogs still wait for you unless Claude was told how to answer.</td></tr>
+    </table>
+
+    <h2>Where it does not work</h2>
+    <p>Browser pages such as settings and the extension store, and tabs that were already open
+      when the extension was installed. Reload those tabs once.</p>
+    <p>To stop all access, choose <strong>New key</strong> in the toolbar popup or disable the extension.
+      To stop the bridge: <code>bun run hub:stop</code>.</p>
+  </main>
+  <script src="welcome.js"></script>
+</body>
+</html>
