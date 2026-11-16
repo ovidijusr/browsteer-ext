@@ -1,5 +1,9 @@
 node_modules/
-extension/dist/
+dist/
+artifacts/
 web-ext-artifacts/
 browsteer.db*
 .DS_Store
+.env
+.op.env
+*.pem

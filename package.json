@@ -1,21 +1,22 @@
 {
   "name": "browsteer",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "bun run scripts/dev.ts",
-    "build": "bun build extension/src/content.ts extension/src/background.ts extension/src/popup.ts --outdir extension/dist --target browser",
-    "build:prod": "bun build extension/src/content.ts extension/src/background.ts extension/src/popup.ts --outdir extension/dist --target browser --minify --sourcemap=none",
+    "build": "bun run scripts/build.ts",
+    "build:firefox": "bun run scripts/build.ts firefox",
+    "build:chrome": "bun run scripts/build.ts chrome",
+    "typecheck": "tsc --noEmit -p extension",
     "test": "bun test",
     "reduction": "bun run test/reduction.ts",
     "mcp": "bun run bridge/mcp.ts",
     "hub": "bun run bridge/hub.ts",
     "hub:stop": "bun run bridge/hub.ts --stop",
-    "bridge": "bun run bridge/mcp.ts",
-    "lint": "bunx web-ext lint --source-dir extension --ignore-files \"src/**\" --self-hosted",
-    "package": "bun run build:prod && bunx web-ext build --source-dir extension --ignore-files \"src/**\" --overwrite-dest",
-    "sign": "bun run build:prod && bunx web-ext sign --source-dir extension --ignore-files \"src/**\" --channel unlisted"
+    "lint:firefox": "bun run build:firefox && bunx web-ext lint --source-dir dist/firefox --self-hosted",
+    "package": "bun run scripts/package.ts",
+    "sign:firefox": "bun run build:firefox && bunx web-ext sign --source-dir dist/firefox --artifacts-dir artifacts --channel unlisted"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@types/bun": "^1.3.14",
     "@types/firefox-webext-browser": "^143.0.0",
-    "happy-dom": "^20.11.1"
+    "happy-dom": "^20.11.1",
+    "typescript": "^7.0.2"
   }
 }

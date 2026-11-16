@@ -1,0 +1,71 @@
+// Build the extension for one browser or both:
+//
+//   bun run scripts/build.ts                 → dist/firefox and dist/chrome
+//   bun run scripts/build.ts chrome --dev    → dist/chrome, unminified
+//
+// Each output directory is a complete, loadable extension. The two differ only
+// in the manifest (how the background runs, browser-specific keys) and in one
+// extra page-world script that Chrome needs for dialog handling.
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+type Target = "firefox" | "chrome";
+const ROOT = new URL("..", import.meta.url).pathname;
+const SRC = join(ROOT, "extension");
+
+const args = process.argv.slice(2);
+const dev = args.includes("--dev");
+const wanted = args.filter((a) => a === "firefox" || a === "chrome") as Target[];
+const targets: Target[] = wanted.length ? wanted : ["firefox", "chrome"];
+
+const version: string = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+
+function manifest(target: Target) {
+  const base = JSON.parse(readFileSync(join(SRC, "manifest.base.json"), "utf8"));
+  base.version = version; // package.json is the single source of the version
+  if (target === "firefox") {
+    return {
+      ...base,
+      background: { scripts: ["background.js"] },
+      browser_specific_settings: {
+        gecko: {
+          id: "browsteer-cc@ovi.lt",
+          strict_min_version: "128.0",
+          data_collection_permissions: { required: ["none"] },
+        },
+      },
+    };
+  }
+  return {
+    ...base,
+    // 116: an open WebSocket keeps the service worker alive. 111: "world": "MAIN".
+    minimum_chrome_version: "116",
+    background: { service_worker: "background.js" },
+    content_scripts: [
+      ...base.content_scripts,
+      { matches: ["<all_urls>"], js: ["dialogs-main.js"], run_at: "document_start", world: "MAIN", all_frames: false },
+    ],
+  };
+}
+
+for (const target of targets) {
+  const out = join(ROOT, "dist", target);
+  rmSync(out, { recursive: true, force: true });
+  mkdirSync(out, { recursive: true });
+
+  const entries = ["background", "content", "popup", "welcome", ...(target === "chrome" ? ["dialogs-main"] : [])];
+  const res = await Bun.build({
+    entrypoints: entries.map((e) => join(SRC, "src", `${e}.ts`)),
+    outdir: out,
+    target: "browser",
+    format: "iife", // classic scripts: content scripts and service workers are not modules
+    minify: !dev,
+    sourcemap: "none",
+  });
+  if (!res.success) { for (const l of res.logs) console.error(l); process.exit(1); }
+
+  for (const f of ["popup.html", "welcome.html", "ui.css"]) cpSync(join(SRC, f), join(out, f));
+  cpSync(join(SRC, "icons"), join(out, "icons"), { recursive: true });
+  writeFileSync(join(out, "manifest.json"), JSON.stringify(manifest(target), null, 2) + "\n");
+  console.log(`built dist/${target}  v${version}${dev ? "  (dev)" : ""}`);
+}
