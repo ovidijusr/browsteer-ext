@@ -425,3 +425,15 @@ describe("typing fallback", () => {
     expect(() => editableIn(doc.getElementById("d")!)).toThrow(/no text field/);
   });
 });
+
+describe("passwords stay in the page", () => {
+  test("a filled password field shows that it is filled, never what with", () => {
+    const doc = docOf(`<body><main><label>Email <input type="email" value="a@b.example"></label>
+      <label>Password <input type="password" value="hunter2secret"></label></main></body>`, "https://a.example/login");
+    const r = snapshot(doc, {});
+    expect(r.tree).toContain("a@b.example");
+    expect(r.tree).not.toContain("hunter2secret");
+    expect(r.tree).toContain("13 chars, hidden");
+    expect(formReport(doc, {}).text).not.toContain("hunter2secret");
+  });
+});

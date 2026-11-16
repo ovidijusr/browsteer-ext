@@ -224,6 +224,12 @@ export function setDialogPolicy(p: { confirm?: DialogPolicy; prompt?: string | n
   return r?.policy ?? { confirm: "native", prompt: null };
 }
 
+/** A request from the bridge arrived: handle this tab's dialogs for the next minute. */
+export function touchDialogs(): void {
+  if (local) local.touch();
+  else if (relayDoc) relay(relayDoc, { touch: true });
+}
+
 export function drainDialogs(): string[] {
   if (local) return local.drain();
   return (relayDoc && relay(relayDoc, { drain: true })?.seen) || [];

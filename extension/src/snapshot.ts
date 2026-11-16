@@ -193,7 +193,9 @@ export function stateOf(el: Element): string {
     const v = clean(ctl.value);
     // A checkbox's value is "on" whether or not it is ticked — printing it reads
     // like a state (ANA signup, 2026-10). Only the live `checked` property counts.
-    if (v && !isBtn && !(isCheck && v === "on")) parts.push(`=${JSON.stringify(v.slice(0, 80))}`);
+    // A password is never part of a snapshot; that it is filled in is all a caller needs.
+    if (tag === "INPUT" && ctl.type === "password") { if (ctl.value) parts.push(`="••••" (${ctl.value.length} chars, hidden)`); }
+    else if (v && !isBtn && !(isCheck && v === "on")) parts.push(`=${JSON.stringify(v.slice(0, 80))}`);
     if (isCheck && ctl.checked) parts.push("*checked");
     if (ctl.disabled) parts.push("*disabled");
   }

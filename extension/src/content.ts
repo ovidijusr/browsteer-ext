@@ -9,13 +9,47 @@
 import { ext } from "./ext";
 import {
   snapshot, collectLinks, formReport, getRef, clean, isVisible,
-  absoluteHref, type Filter,
+  absoluteHref, accessibleName, roleOf, type Filter,
 } from "./snapshot";
+import { guardClick, guardPress } from "./guard";
 import {
-  scan, clickAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks,
+  scan, clickAt, deepElementAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks, touchDialogs,
 } from "./fallback";
 
 installDialogHooks(window);
+
+// ── "Claude is working here" ─────────────────────────────────────────────────
+// A bar across the top of the tab while requests are arriving, so it is never a
+// surprise that the page is being read or operated. It lives in a closed shadow
+// root on <html>: page styles cannot hide it, page scripts cannot read inside it,
+// and showing or hiding it does not count as a change to the page.
+const working = (() => {
+  let bar: HTMLElement | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const host = document.createElement("browsteer-working");
+    host.setAttribute("aria-hidden", "true");
+    // Inline and !important: a page stylesheet cannot restyle or hide it. (A page
+    // script can still remove the element; the toolbar badge does not depend on it.)
+    for (const [k, v] of Object.entries({ all: "initial", display: "block", visibility: "visible", opacity: "1", position: "fixed", top: "0", left: "0", right: "0", height: "0", "z-index": "2147483647", "pointer-events": "none" }))
+      host.style.setProperty(k, v, "important");
+    const root = host.attachShadow({ mode: "closed" });
+    bar = document.createElement("div");
+    bar.style.cssText = "display:none;height:3px;background:#2447e0;box-shadow:0 0 0 1px rgba(255,255,255,.7)";
+    const tag = document.createElement("div");
+    tag.textContent = "Claude is working in this tab";
+    tag.style.cssText = "position:absolute;top:3px;right:12px;padding:3px 9px 4px;border-radius:0 0 7px 7px;background:#2447e0;color:#fff;font:600 11px/1.3 system-ui,sans-serif";
+    bar.append(tag);
+    root.append(bar);
+    document.documentElement.append(host);
+  } catch {}
+  return () => {
+    if (!bar) return;
+    bar.style.display = "block";
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { if (bar) bar.style.display = "none"; }, 4000);
+  };
+})();
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 function resolve(ref: number): Element {
@@ -38,8 +72,9 @@ function pulse() {
   return { url: location.href, mutations, ready: document.readyState };
 }
 
-function doClick(ref: number) {
+function doClick(ref: number, confirm = false) {
   const el = resolve(ref) as HTMLElement;
+  guardClick(el, confirm);
   el.scrollIntoView({ block: "center" });
   const before = mutations;
   const r = el.getBoundingClientRect();
@@ -59,7 +94,8 @@ function hitTarget(el: HTMLElement, x: number, y: number): HTMLElement {
   return hit instanceof HTMLElement && el.contains(hit) ? hit : el;
 }
 
-function doClickAt(x: number, y: number) {
+function doClickAt(x: number, y: number, confirm = false) {
+  guardClick(deepElementAt(document, x, y), confirm, "browser_click({ x, y, confirm: true })");
   const before = mutations;
   const r = clickAt(document, x, y);
   return { url: location.href, mutations: before, pulse: true, hit: r.hit };
@@ -117,6 +153,9 @@ function doRead(ref: number) {
   } else if (el instanceof HTMLSelectElement) {
     const opt = el.options[el.selectedIndex];
     text = opt ? `${clean(opt.text)}${opt.value ? ` (value ${opt.value})` : " (no value — placeholder)"}` : "";
+  } else if (el instanceof HTMLInputElement && el.type === "password") {
+    // Never hand a password to the bridge; whether it is filled in is enough to work with.
+    text = el.value ? `(password field, ${el.value.length} characters, hidden)` : "(password field, empty)";
   } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     text = el.value;
   } else {
@@ -133,7 +172,8 @@ function doRead(ref: number) {
 async function pageFetch(p: any) {
   const w: any = globalThis as any;
   const method = String(p.method ?? "GET").toUpperCase();
-  const init = { method, credentials: "include", headers: p.headers ?? {}, body: method === "GET" || method === "HEAD" ? undefined : p.body };
+  // No redirects, for the same reason as the background fetch: the first hop is the only one that was checked.
+  const init = { method, credentials: "include", headers: p.headers ?? {}, body: method === "GET" || method === "HEAD" ? undefined : p.body, redirect: p.followRedirects === true ? "follow" : "error" };
   // Objects handed to the page's fetch must live in the page compartment (cloneInto), else
   // "Permission denied to access property 'constructor'". Read the body as text — a page-side
   // ArrayBuffer is just as unreachable. (Text-only is fine: this op exists for page APIs.)
@@ -150,14 +190,12 @@ async function pageFetch(p: any) {
 function doHtml(ref: number | undefined, stripNoise = true, up = 0, offset = 0, maxBytes = 50_000) {
   let el = (ref != null ? resolve(ref) : document.documentElement) as HTMLElement;
   for (let i = 0; i < up && el.parentElement; i++) el = el.parentElement; // climb to a container
-  let html: string;
-  if (stripNoise) {
-    const clone = el.cloneNode(true) as HTMLElement;
-    clone.querySelectorAll("script,style,noscript,svg,link,template,iframe").forEach((n) => n.remove());
-    html = clone.outerHTML;
-  } else {
-    html = el.outerHTML;
-  }
+  // Always a clone: a password a server pre-filled into the markup is blanked first.
+  const clone = el.cloneNode(true) as HTMLElement;
+  if (stripNoise) clone.querySelectorAll("script,style,noscript,svg,link,template,iframe").forEach((n) => n.remove());
+  const pw = clone.matches?.("input[type=password]") ? [clone] : Array.from(clone.querySelectorAll("input[type=password][value]"));
+  for (const n of pw) if (n.hasAttribute("value")) n.setAttribute("value", "••••");
+  const html = clone.outerHTML;
   const total = html.length;
   const slice = html.slice(offset, offset + maxBytes);
   return {
@@ -176,8 +214,10 @@ const KEYS: Record<string, string> = {
   Enter: "Enter", Tab: "Tab", Escape: "Escape", Backspace: "Backspace",
   ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
 };
-function doPress(key: string, ref?: number) {
+function doPress(key: string, ref?: number, confirm = false) {
   const el = ((ref != null ? resolve(ref) : document.activeElement) as HTMLElement) ?? document.body;
+  // Enter and Space activate things: the focused control, or the form the field is in.
+  guardPress(el, key, confirm);
   el.focus?.();
   const code = key.length === 1 ? `Key${key.toUpperCase()}` : (KEYS[key] ?? key);
   const keyCode =
@@ -312,7 +352,7 @@ function handleOp(op: string, params: any): unknown {
       return formReport(document, { root });
     }
     case "href": { const el = resolve(params.ref) as Element; return { url: location.href, href: absoluteHref(el, location.href) }; }
-    case "click": return params?.ref == null && params?.x != null ? doClickAt(params.x, params.y) : doClick(params.ref);
+    case "click": return params?.ref == null && params?.x != null ? doClickAt(params.x, params.y, params.confirm === true) : doClick(params.ref, params.confirm === true);
     case "scan": {
       const root = params?.ref != null ? (resolve(params.ref) as Element) : undefined;
       return scan(document, { root, step: params?.step, limit: params?.limit });
@@ -325,7 +365,7 @@ function handleOp(op: string, params: any): unknown {
     case "options": return doOptions(params.ref);
     case "read": return doRead(params.ref);
     case "html": return doHtml(params.ref, params.clean ?? true, params.up ?? 0, params.offset ?? 0, params.maxBytes ?? 50_000);
-    case "press": return doPress(params.key, params.ref);
+    case "press": return doPress(params.key, params.ref, params.confirm === true);
     case "pick": return startPicker(); // returns a Promise (waits for the user)
     case "pageFetch": return pageFetch(params);
     default: throw new Error(`Unknown op '${op}'`);
@@ -338,6 +378,16 @@ void isVisible;
 ext.runtime.onMessage.addListener(
   (msg: any, _sender: unknown, sendResponse: (r: unknown) => void) => {
     if (!msg || typeof msg.op !== "string") return false; // not for us (e.g. popup msgs)
+    // Only the background relays ops; a message from anywhere else is not one.
+    if ((_sender as any)?.id !== ext.runtime.id || (_sender as any)?.tab) return false;
+    // The background checked this tab's site a moment ago; if the page has since
+    // moved to another host, that check no longer describes it.
+    const expect = msg.params?.expectHost;
+    if (typeof expect === "string" && expect !== location.hostname.toLowerCase()) {
+      sendResponse({ ok: false, error: `The tab moved to ${location.hostname} while this request was on its way, so nothing was done. Take a new browser_snapshot.` });
+      return false;
+    }
+    if (msg.op !== "pick") { working(); touchDialogs(); }
     // handleOp may return a value or a Promise (pick waits for a click) — await both.
     Promise.resolve()
       .then(() => handleOp(msg.op, msg.params))

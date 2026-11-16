@@ -12,7 +12,7 @@ import { join } from "node:path";
 // reading the real saved filters (which would make them non-deterministic) and
 // writing into the real action log.
 const DB_DIR = process.env.BROWSTEER_DB_DIR || join(homedir(), ".browsteer");
-mkdirSync(DB_DIR, { recursive: true });
+mkdirSync(DB_DIR, { recursive: true, mode: 0o700 });
 const DB_PATH = join(DB_DIR, "browsteer.db");
 const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL;");
@@ -176,3 +176,13 @@ export function clearMemos(host?: string): number {
 }
 export function pruneMemos(maxAgeMs: number): number { return memoPrune.run({ $before: Date.now() - maxAgeMs }).changes; }
 export function listMemos(host?: string): Memo[] { return host ? memoListHost.all({ $host: host }) : memoList.all(); }
+
+// ── Housekeeping ─────────────────────────────────────────────────────────────
+/** The database and its WAL side files, so the hub can make them private to this user. */
+export function dbFiles(): string[] {
+  return [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`];
+}
+/** Drop action-log rows older than maxAgeMs; returns how many went. */
+export function pruneActions(maxAgeMs: number): number {
+  return db.prepare("DELETE FROM actions WHERE ts < $before").run({ $before: Date.now() - maxAgeMs }).changes;
+}

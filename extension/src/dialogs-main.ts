@@ -14,6 +14,7 @@ try {
 document.addEventListener(REQ, (e) => {
   let req: RelayReq = {};
   try { req = JSON.parse((e as CustomEvent).detail); } catch {}
+  if (req.touch) d.touch();
   const res: RelayRes = { policy: d.setPolicy(req.policy ?? {}), seen: req.drain ? d.drain() : [] };
   document.dispatchEvent(new CustomEvent(RES, { detail: JSON.stringify(res) }));
 });

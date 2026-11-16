@@ -15,9 +15,11 @@ One **hub** daemon owns the browser connection and persists across sessions. A
 thin **MCP shim** is what Claude starts per session; it forwards `browser_*`
 calls to the hub and starts the hub on first use.
 
-Nothing leaves the computer except what Claude Code itself sends to Claude.
-[PRIVACY.md](PRIVACY.md) has the details, and
-[docs/PERMISSIONS.md](docs/PERMISSIONS.md) explains every permission the
+Access is closed by default. Claude can use the browser only while you have
+allowed it for an hour, only on sites you have allowed, and one site per
+session. [SECURITY.md](SECURITY.md) lists every limit and what it does not
+cover, [PRIVACY.md](PRIVACY.md) says what is kept and what leaves the machine,
+and [docs/PERMISSIONS.md](docs/PERMISSIONS.md) explains every permission the
 extension asks for.
 
 ## Setup
@@ -49,18 +51,25 @@ and select `dist/firefox/manifest.json`.
 A setup page opens after install. It shows this browser's pairing key and turns
 green once the bridge is found.
 
-> The hub listens on `127.0.0.1:8787`. `BRIDGE_PORT` moves the bridge side only;
-> the extension has the port in `extension/src/background.ts` and in the
-> manifest CSP, so changing it means editing those too.
+> The hub listens on `127.0.0.1:8787`. To use another port, set `BRIDGE_PORT`
+> both when building the extension (`BRIDGE_PORT=8799 bun run build`) and in the
+> environment the hub and MCP shim run in.
 
 ## Use it
 
-Click the Browsteer toolbar button, copy the command, paste it into Claude Code
-and add a task:
+Open the page you want help with and click the Browsteer toolbar button:
+
+1. **Allow Claude for 1 hour.** Access closes by itself afterwards; *Stop now* closes it at once.
+2. **Allow** the site in the tab. Sites you have not allowed cannot be read or operated.
+3. **Copy /browse command**, paste it into Claude Code and add a task:
 
 ```
-/browse bst-ab12-cd34 list the open pull requests on this page
+/browse bst-ab12-cd34-ef56 list the open pull requests on this page
 ```
+
+Optional switches in the popup: **Read only** (Claude can look but not click or
+type) and **Let Claude switch site** (a session stays on the site it started
+on; this lets the current one continue elsewhere).
 
 The `/browse` skill calls `browser_pair(key)`, then works with
 `browser_snapshot` / `browser_click` / `browser_fill` / `browser_read`. Refs
@@ -169,18 +178,25 @@ wrong document. `browser_pin` with no `tabId` opts out for the session.
 |------|------|
 | `bridge/hub.ts` | the daemon: WebSocket server, pairing registry, every `browser_*` op |
 | `bridge/mcp.ts` | per-session MCP shim that forwards to the hub |
+| `bridge/security.ts` | token, extension binding, site lock, fetch and download limits, config |
 | `bridge/jev.ts` | optional semantic targeting: questions, thresholds, opt-in switch |
 | `bridge/db.ts` | `bun:sqlite` action log, filters, memos (`~/.browsteer/browsteer.db`) |
 | `bridge/cli.ts` | run any single op from a shell |
 | `extension/manifest.base.json` | manifest shared by both browsers; `scripts/build.ts` adds the per-browser keys |
 | `extension/src/ext.ts` | one name for the WebExtensions API in both browsers |
 | `extension/src/background.ts` | socket to the hub, key registration, relays ops to the tab (event page in Firefox, service worker in Chrome) |
+| `extension/src/policy.ts` | access rules: key generation, arming, site lists, read-only, the gate every request passes |
+| `extension/src/risk.ts` | which control names count as a commitment (shared with the hub) |
+| `extension/src/guard.ts` | the check before a click or key press activates a control |
+| `extension/src/site.ts` | what counts as one site (shared with the hub) |
 | `extension/src/content.ts` | actions (click/fill/read/press), element picker, message plumbing |
 | `extension/src/snapshot.ts` | snapshot core — pure DOM-in/string-out, unit-tested under happy-dom |
 | `extension/src/fallback.ts` | hit-test scan, coordinate clicks, keyboard-style typing |
 | `extension/src/dialogs.ts`, `dialogs-main.ts` | alert/confirm/prompt handling; the second file is Chrome's page-world half |
 | `extension/src/popup.ts`, `welcome.ts`, `keyview.ts` | popup and setup page |
 | `scripts/build.ts`, `package.ts`, `dev.ts` | build, package, dev loop |
+| `scripts/check-manifest.ts` | CI check: the built manifests ask for exactly what is documented |
+| `.github/workflows/ci.yml` | typecheck, tests, build, manifest check, Firefox lint, package |
 | `skill/browse/SKILL.md` | the `/browse` slash command for Claude Code |
 
 ## Tests

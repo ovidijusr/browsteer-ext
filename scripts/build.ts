@@ -18,11 +18,14 @@ const dev = args.includes("--dev");
 const wanted = args.filter((a) => a === "firefox" || a === "chrome") as Target[];
 const targets: Target[] = wanted.length ? wanted : ["firefox", "chrome"];
 
+// The bridge port is baked in: the extension can only ever talk to this one address.
+const port = String(Number(process.env.BRIDGE_PORT ?? 8787));
 const version: string = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
 
 function manifest(target: Target) {
   const base = JSON.parse(readFileSync(join(SRC, "manifest.base.json"), "utf8"));
   base.version = version; // package.json is the single source of the version
+  base.content_security_policy.extension_pages = base.content_security_policy.extension_pages.replace("127.0.0.1:8787", `127.0.0.1:${port}`);
   if (target === "firefox") {
     return {
       ...base,
@@ -61,11 +64,12 @@ for (const target of targets) {
     format: "iife", // classic scripts: content scripts and service workers are not modules
     minify: !dev,
     sourcemap: "none",
+    define: { BRIDGE_PORT: JSON.stringify(port) },
   });
   if (!res.success) { for (const l of res.logs) console.error(l); process.exit(1); }
 
   for (const f of ["popup.html", "welcome.html", "ui.css"]) cpSync(join(SRC, f), join(out, f));
   cpSync(join(SRC, "icons"), join(out, "icons"), { recursive: true });
   writeFileSync(join(out, "manifest.json"), JSON.stringify(manifest(target), null, 2) + "\n");
-  console.log(`built dist/${target}  v${version}${dev ? "  (dev)" : ""}`);
+  console.log(`built dist/${target}  v${version}${dev ? "  (dev)" : ""}${port === "8787" ? "" : `  (bridge port ${port})`}`);
 }

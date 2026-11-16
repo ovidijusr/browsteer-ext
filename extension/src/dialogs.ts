@@ -10,20 +10,31 @@
 //             content script talks to it over DOM events (see relay below).
 export type DialogPolicy = "native" | "accept" | "dismiss";
 export type PolicyState = { confirm: DialogPolicy; prompt: string | null };
+/** How long after the last request a tab still counts as "Claude is working here". */
+export const ACTIVE_MS = 60_000;
 
 export function createDialogs(win: Window) {
   const log: string[] = [];
   let nextConfirm: DialogPolicy = "native";
   let nextPromptValue: string | null = null;
+  const nativeAlert = win.alert.bind(win);
   const nativeConfirm = win.confirm.bind(win);
   const nativePrompt = win.prompt.bind(win);
+  // Dialogs are only handled while Claude is working in the tab: each request
+  // from the bridge extends this window. Outside it the page gets the browser's
+  // own dialogs, exactly as if the extension were not installed.
+  let activeUntil = 0;
+  const active = () => Date.now() < activeUntil;
 
   return {
+    touch(ms = ACTIVE_MS): void { activeUntil = Date.now() + ms; },
     alert(msg?: unknown): void {
+      if (!active()) return nativeAlert(msg as any);
       log.push(`alert ${JSON.stringify(String(msg ?? ""))} → OK (auto)`);
     },
     confirm(msg?: unknown): boolean {
       const text = String(msg ?? "");
+      if (!active()) return nativeConfirm(text);
       if (nextConfirm === "native") {
         const a = nativeConfirm(text);
         log.push(`confirm ${JSON.stringify(text)} → ${a ? "OK" : "Cancel"} (by user)`);
@@ -36,6 +47,7 @@ export function createDialogs(win: Window) {
     },
     prompt(msg?: unknown, def?: unknown): string | null {
       const text = String(msg ?? "");
+      if (!active()) return nativePrompt(text, def == null ? undefined : String(def));
       if (nextPromptValue === null) {
         const a = nativePrompt(text, def == null ? undefined : String(def));
         log.push(`prompt ${JSON.stringify(text)} → ${JSON.stringify(a)} (by user)`);
@@ -64,7 +76,7 @@ export function createDialogs(win: Window) {
 // over how its own dialogs are answered, which it already has.
 export const REQ = "browsteer:dialogs:req";
 export const RES = "browsteer:dialogs:res";
-export type RelayReq = { policy?: { confirm?: DialogPolicy; prompt?: string | null }; drain?: boolean };
+export type RelayReq = { policy?: { confirm?: DialogPolicy; prompt?: string | null }; drain?: boolean; touch?: boolean };
 export type RelayRes = { policy: PolicyState; seen: string[] };
 
 export function relay(doc: Document, req: RelayReq): RelayRes | null {

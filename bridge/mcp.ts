@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn as nodeSpawn } from "node:child_process";
+import { readToken } from "./security";
 
 const HUB_URL = `ws://127.0.0.1:${process.env.BRIDGE_PORT ?? 8787}`;
 const HUB_PATH = new URL("./hub.ts", import.meta.url).pathname;
@@ -22,8 +23,8 @@ function openControl(): Promise<void> {
   return new Promise((resolve, reject) => {
     const sock = new WebSocket(HUB_URL);
     const to = setTimeout(() => { try { sock.close(); } catch {} reject(new Error("connect timeout")); }, 2000);
-    sock.onopen = () => { clearTimeout(to); sock.send(JSON.stringify({ type: "hello", role: "control" })); ws = sock; resolve(); };
-    sock.onmessage = (ev) => { let m: any; try { m = JSON.parse(String(ev.data)); } catch { return; } const p = pending.get(m.id); if (!p) return; clearTimeout(p.timer); pending.delete(m.id); p.resolve(m); };
+    sock.onopen = () => { clearTimeout(to); sock.send(JSON.stringify({ type: "hello", role: "control", token: readToken() })); ws = sock; resolve(); };
+    sock.onmessage = (ev) => { let m: any; try { m = JSON.parse(String(ev.data)); } catch { return; } if (m.type === "denied") { console.error(`[browsteer] hub refused this session: ${m.reason}`); for (const [id, w] of pending) { clearTimeout(w.timer); pending.delete(id); w.resolve({ id, ok: false, text: `The Browsteer hub refused this session: ${m.reason} Restart the hub (bun run hub:stop) and try again.` }); } return; } const p = pending.get(m.id); if (!p) return; clearTimeout(p.timer); pending.delete(m.id); p.resolve(m); };
     sock.onclose = () => { if (ws === sock) ws = null; };
     sock.onerror = () => { clearTimeout(to); reject(new Error("connect error")); };
   });
@@ -131,6 +132,7 @@ tool("browser_click", {
     "If the reply says nothing changed, escalate to browser_scan rather than retrying the same ref.",
   inputSchema: {
     ref: z.number().int().optional().describe("Element ref from browser_snapshot or browser_scan"),
+    confirm: z.boolean().optional().describe("Controls whose name sounds irreversible (delete, pay, send, sign out…) are refused unless this is true. Set it only after the user has said yes to this specific action."),
     x: z.number().optional().describe("Viewport x in CSS px (with y, instead of ref)"),
     y: z.number().optional().describe("Viewport y in CSS px"),
     settle: z.number().int().min(0).max(5000).optional().describe("Max ms to wait for the page to react (URL change / DOM quiet / unload) before returning; default 800, 0 = return immediately"),
@@ -218,7 +220,7 @@ tool("browser_fetch", {
     "endpoints — it is GET-only by design.",
   inputSchema: {
     url: z.string().url().describe("Absolute URL to fetch"),
-    saveTo: z.string().optional().describe("Local file path to write the body to (e.g. ~/Downloads/export.json). Returns a short preview instead of the body."),
+    saveTo: z.string().optional().describe("File name (or path) inside the download folder, ~/Downloads/browsteer by default; anything outside it is refused. Returns a short preview instead of the body."),
     maxBytes: z.number().int().positive().optional().describe("Inline return cap for text bodies (default 50000)"),
     preview: z.number().int().positive().optional().describe("With saveTo: how many leading bytes to echo (default 600)"),
     headers: z.record(z.string()).optional().describe("Extra request headers, e.g. {Accept:'application/json'}"),
@@ -284,7 +286,7 @@ tool("browser_press", {
     "Dispatch a key to a [ref] (or the focused element) — e.g. 'Enter' to commit an " +
     "autocomplete, 'ArrowDown' to move a dropdown highlight, 'Escape' to close. Keys: " +
     "Enter, Tab, Escape, ArrowUp/Down/Left/Right, Backspace, or a single character.",
-  inputSchema: { key: z.string().describe("Key name (Enter, ArrowDown, …) or a single character"), ref: z.number().int().optional().describe("Target element ref; omit to use the focused element") },
+  inputSchema: { key: z.string().describe("Key name (Enter, ArrowDown, …) or a single character"), ref: z.number().int().optional().describe("Target element ref; omit to use the focused element") , confirm: z.boolean().optional().describe("Enter or Space on a control that sounds irreversible (or in a form whose submit button does) is refused unless this is true. Set it only after the user agreed to this specific action.") },
 });
 
 tool("browser_pick", {
