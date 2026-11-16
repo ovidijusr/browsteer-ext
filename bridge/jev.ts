@@ -26,19 +26,10 @@ export const THRESHOLDS = {
 
 // Guard is only asked when the candidate's name smells like a commitment. Links
 // only navigate; unlabelled or neutral buttons on a click path are not worth a
-// 250 ms round trip. Tune here; matched names are visible in actions.detail.
-//
-// English words are whole-word (`\bbook\b` no longer fires on "Booking.com",
-// `\bpost\b` not on "Posts"); Lithuanian entries stay stems because of inflection.
-// STRONG words guard every role. WEAK words are commitments only on buttons
-// ("Order" / "Post" / "Share" as a nav link is a section, not an action).
-export const RISK_RE = /\b(buy|purchase|checkout|pay|payment|subscribe|unsubscribe|send|submit|confirm|approve|publish|delete|remove|erase|log ?out|sign ?out|transfer|donate)\b|(pirkti|užsakyti|apmok|mokė|prenumer|siųsti|siusti|patvirtin|ištrin|istrin|šalin|salin|atšauk|atsauk|atsijung|užsisak|rezervuo|paskelb|dalintis|atsakyti)/i;
-export const RISK_WEAK_RE = /\b(order|post|reply|share|cancel|book|reserve)\b/i;
-export function needsGuard(c: { role: string; name: string }): boolean {
-  if (RISK_RE.test(c.name)) return true;
-  if (c.role === "link") return false;
-  return RISK_WEAK_RE.test(c.name) || c.name.trim().length < 2; // nameless controls stay guarded
-}
+// 250 ms round trip. The word lists live in extension/src/risk.ts, shared with
+// the content script; matched names are visible in actions.detail.
+export { RISK_RE, RISK_WEAK_RE, needsGuard } from "../extension/src/risk";
+import { needsGuard } from "../extension/src/risk";
 
 // ── Memos: skip Jev when this host already taught us the answer ─────────────
 // A memo is written only after a confident Jev verdict (see MEMO below) and is
