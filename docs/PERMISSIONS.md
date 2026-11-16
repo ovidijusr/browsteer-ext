@@ -10,10 +10,10 @@ and operate the pages the user has open, through a local bridge the user starts.
 | Permission | Used by | Why it is needed |
 |---|---|---|
 | `tabs` | `background.ts`: `tabs.query`, `tabs.get`, `tabs.update`, `tabs.sendMessage`, `tabs.create` | List open tabs with their titles and addresses so the user's session can choose one, address the chosen tab, navigate it, and open the setup page after install. |
-| `storage` | `background.ts`, `content.ts`, `popup.ts` | Persist the pairing key so it survives restarts, and remember the last element picked with the picker. Two values, local only. |
-| `alarms` | `background.ts` | Wake the background every 15–30 s to reconnect to the local bridge after it restarts. Timers alone do not survive background suspension. |
-| `webRequest` | `background.ts`: `onBeforeRequest`, `onCompleted` | Observe (never block or modify) page requests to keep an in-memory list of the last 300, so the assistant can find the API call a page made instead of scraping. |
-| Host access `<all_urls>` | content script on every page; `fetch` from the background | The user decides at run time which site to work on, so the content script that reads and operates the page must be available on any site. Also lets requests the user asks for carry that site's cookies. |
+| `storage` | `background.ts`, `content.ts`, `popup.ts` | Persist the pairing key, the user's access settings (allowed and blocked sites, read-only, when access ends) and the last element picked with the picker. Local only. |
+| `alarms` | `background.ts` | Wake the background every 15–30 s to reconnect to the local bridge after it restarts and to show on the toolbar badge when the access hour has ended. Timers alone do not survive background suspension. |
+| `webRequest` | `background.ts`: `onBeforeRequest`, `onCompleted` | Observe (never block or modify) requests made by sites the user allowed, while access is on, to keep an in-memory list of the last 300: method, address, status, content type. Request bodies are not requested (`requestBody` is not used). This lets the assistant find the API call a page made instead of scraping. |
+| Host access `<all_urls>` | content script on every page; `fetch` from the background | The user decides at run time which sites to allow, so the content script that reads and operates the page must be available on any site; it does nothing on a site until the user allows that site in the popup. Also lets requests the user asks for carry that site's cookies. |
 
 Chrome only:
 
@@ -51,3 +51,9 @@ script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:8787 https://* 
 - Data handling is described in [PRIVACY.md](../PRIVACY.md). Firefox's
   `data_collection_permissions` is declared as `none`: the extension transmits
   nothing off the device.
+
+## Kept honest by CI
+
+`scripts/check-manifest.ts` runs in CI after the build and fails if either
+manifest requests a permission, host pattern or CSP source that is not in the
+list above, or if `externally_connectable` or web-accessible resources appear.

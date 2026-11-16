@@ -9,8 +9,10 @@ keeps, and what leaves the machine.
 - The extension talks to one address only: `ws://127.0.0.1:8787`, the bridge on
   your own computer. It contains no analytics, no remote code and no remote
   assets.
-- The bridge listens on the loopback interface only and refuses connections
-  opened by web pages.
+- The bridge listens on the loopback interface only, refuses connections
+  opened by web pages, and requires a secret that only your user can read.
+- Nothing is read until you allow access for an hour, and then only on sites
+  you have allowed.
 - Page content reaches Claude only because Claude Code asked the bridge for it
   during a session where you pasted this browser's pairing key.
 - One optional feature, semantic targeting, sends page outlines to a third
@@ -20,12 +22,12 @@ keeps, and what leaves the machine.
 
 | What | Detail |
 |---|---|
-| Reads | The page in the tab Claude is working in: its visible text, controls, links and, on request, HTML. Tab titles and addresses, to list tabs. |
+| Reads | The page in the tab Claude is working in, if its site is allowed: visible text, controls, links and, on request, HTML. Titles and addresses of tabs on allowed sites. Password field contents are never included. |
 | Acts | Clicks, typing, key presses, navigation and same-site requests in that tab, using the sessions you are signed in to. |
-| Keeps in memory | The address, method, status and submitted form data (first 4,000 characters) of the last 300 requests made by pages, so Claude can find a page's own API. Cleared when the browser or the extension restarts. Never written to disk. |
-| Stores | In extension storage: the pairing key and the selector of the last element you picked. |
+| Keeps in memory | The address, method, status and content type of the last 300 requests made by allowed sites while access is on, so Claude can find a page's own API. No request or response contents. Cleared when the browser or the extension restarts. Never written to disk. |
+| Stores | In extension storage: the pairing key, your access settings (allowed and blocked sites, read-only, when access ends) and the selector of the last element you picked. |
 | Sends | Only to the local bridge, and only in reply to a request from it. |
-| Dialogs | Replaces `alert`, `confirm` and `prompt` on pages so a dialog cannot freeze the tab. `alert` is answered automatically and its text reported; `confirm` and `prompt` still wait for you unless Claude set an answer for the next one. |
+| Dialogs | For one minute after each request from Claude, a page's `alert` is answered automatically and its text reported, so a dialog cannot freeze the tab; `confirm` and `prompt` still wait for you unless Claude set an answer for the next one. At all other times dialogs are the browser's own. |
 
 It does not run in private/incognito windows unless you allow that in the
 browser's extension settings.
@@ -34,8 +36,8 @@ browser's extension settings.
 
 | What | Detail |
 |---|---|
-| Network | Listens on `127.0.0.1:8787`. Accepts the extension and local command-line clients; a socket opened by a web page is refused. |
-| Stores | `~/.browsteer/browsteer.db` (SQLite): an action log (time, page address, tool, element reference, outcome), saved snapshot filters, and learned "target → control" names per site. Text typed into fields is logged as a length only. Delete the file to clear everything. |
+| Network | Listens on `127.0.0.1:8787`. Accepts the one extension it is bound to, and local clients that present the secret in `~/.browsteer/token`. Sockets opened by web pages are refused. |
+| Stores | `~/.browsteer/browsteer.db` (SQLite): an action log (time, page address, tool, element reference, outcome), saved snapshot filters, and learned "target → control" names per site. Text typed into fields is logged as a length only. Rows older than 30 days are removed. The folder and its files are readable by your user only. Delete the file to clear everything. |
 | Sends | Results go back to the Claude Code session over stdio. The bridge makes no network requests of its own unless semantic targeting is on. |
 
 ## Claude
@@ -58,13 +60,18 @@ Do not turn it on for pages whose content must not leave your organisation.
 
 ## Pairing key
 
-The key (`bst-xxxx-xxxx`) selects which browser a session works in. Anyone who
-can run commands on your computer and knows the key can operate that browser
-profile through the bridge, so treat it like access to the profile. *New key*
-in the popup replaces it immediately.
+The key (`bst-xxxx-xxxx-xxxx`) selects which browser a session works in, and
+is required: the bridge never picks a browser by itself. It is generated from
+the browser's cryptographic random source. A program on your computer that can
+read `~/.browsteer/token` and knows the key can use the browser within the
+limits you set in the popup, so treat the key like access to the profile.
+*New key* replaces it immediately.
 
 ## Stopping
 
+- *Stop now* in the popup closes access at once; it also closes by itself after an hour.
 - *New key* in the popup ends the current pairing.
 - Disabling or removing the extension ends all access.
 - `bun run hub:stop` stops the bridge.
+
+See [SECURITY.md](SECURITY.md) for the full list of limits and what they do not cover.
