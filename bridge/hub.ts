@@ -11,7 +11,7 @@
 //
 // All logging goes to STDERR (stdout is unused here, but keep the habit).
 import { logAction, upsertFilter, listFilters, deleteFilter, getMemo, saveMemo, bumpMemo, clearMemos, listMemos, pruneMemos, type Memo } from "./db";
-import { THRESHOLDS, MEMO, findTarget, findMany, guardClick, needsGuard, warm, formatShortlist, pct, parseCandidates, memoMatch, lexicalMatch, candKey, type Ranked, type Candidate, type FindResult } from "./jev";
+import { THRESHOLDS, MEMO, JEV_OFF, jevEnabled, findTarget, findMany, guardClick, needsGuard, warm, formatShortlist, pct, parseCandidates, memoMatch, lexicalMatch, candKey, type Ranked, type Candidate, type FindResult } from "./jev";
 import type { ServerWebSocket } from "bun";
 
 const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
@@ -128,6 +128,9 @@ async function jevSnapshot(ctl: Controller, withText: boolean): Promise<any> {
 // Guard only when the name smells like a commitment; otherwise 0 without a round trip.
 async function maybeGuard(cand: Ranked, goal: string, url: string): Promise<{ g: number; asked: boolean }> {
   if (!needsGuard(cand)) return { g: 0, asked: false };
+  // Without Jev nobody can judge whether a commitment-sounding control is safe:
+  // treat it as irreversible so the click is refused and Claude must ask for it.
+  if (!jevEnabled()) return { g: 1, asked: false };
   return { g: await guardClick(cand, goal, url), asked: true };
 }
 // Click, then wait for the page to react by polling the content script's
@@ -373,6 +376,10 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
           const lex = lexicalMatch(t, cands); if (lex) lexHits.set(i, lex);
         });
         const askJev = targets.filter((_, i) => !memoHits.has(i) && !lexHits.has(i));
+        if (askJev.length && !jevEnabled()) {
+          logAction({ tab_url: snap.url, tool: "find", value: targets.join(" | "), ok: false, error: "jev off" });
+          return fail(`No control on this page is named ${askJev.map((t) => JSON.stringify(t)).join(", ")}.\n${JEV_OFF}`);
+        }
         let results: FindResult[] = [];
         const retried = false;
         if (askJev.length) {
@@ -503,6 +510,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
       const goal = String(p.goal ?? "").trim();
       const maxSteps = Math.min(Math.max(Number(p.maxSteps ?? 6), 1), 12);
       if (!goal) return fail("pursue: `goal` is required.");
+      if (!jevEnabled()) return fail(`pursue needs semantic targeting. ${JEV_OFF}`);
       const trail: string[] = [];
       let tokens = 0, jevMs = 0, settleMs = 0;
       const t0 = performance.now();
@@ -594,7 +602,8 @@ if (process.argv.includes("--stop")) {
       },
     });
     console.error(`[hub] listening on ws://127.0.0.1:${WS_PORT}`);
-    warm().then(() => console.error("[hub] jev connection warm")); // first find should not pay the TLS handshake
+    console.error(`[hub] semantic targeting (Jev): ${jevEnabled() ? "on — page outlines go to api.typesafe.ai on find/pursue" : "off"}`);
+    if (jevEnabled()) warm().then(() => console.error("[hub] jev connection warm")); // first find should not pay the TLS handshake
     // Idle connections go cold in well under a minute (first request after a pause:
     // 650–850 ms vs 270 warm). One cheap ping every 25 s while a browser is attached.
     setInterval(() => { if (browsers.size) warm(); }, 25_000);

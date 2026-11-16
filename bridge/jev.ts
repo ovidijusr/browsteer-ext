@@ -89,7 +89,22 @@ export function lexicalMatch(target: string, cands: Candidate[]): Candidate | nu
 
 // Warm the TLS connection at hub start so the first find is not the slow one.
 export async function warm(): Promise<void> {
+  if (!jevEnabled()) return;
   try { await client().models.list(); } catch {}
+}
+
+// ── Opt-in ───────────────────────────────────────────────────────────────────
+// Asking Jev sends an outline of the current page (control names + visible text)
+// to api.typesafe.ai. That is off unless the person running the hub turned it
+// on: BROWSTEER_JEV=1 in the hub's environment, or {"jev": true} in
+// ~/.browsteer/config.json. Off, find answers from the page alone (memos +
+// exact names) and pursue is unavailable; nothing leaves the machine.
+export const JEV_OFF = 'Semantic targeting is off, so no page content is sent to TypeSafe. Turn it on with {"jev": true} in ~/.browsteer/config.json (see PRIVACY.md), or use browser_snapshot and act on refs.';
+export function jevEnabled(): boolean {
+  const env = process.env.BROWSTEER_JEV;
+  if (env != null) return env === "1" || env === "true";
+  const file = `${process.env.BROWSTEER_DB_DIR || `${homedir()}/.browsteer`}/config.json`;
+  try { return JSON.parse(readFileSync(file, "utf8")).jev === true; } catch { return false; }
 }
 
 export const MAX_STATE_CHARS = 60_000; // ≈15k tokens; Jev's state budget is 32k tokens
@@ -110,6 +125,7 @@ export function loadApiKey(): string | null {
 let _client: TypeSafeClient | null = null;
 export function client(): TypeSafeClient {
   if (_client) return _client;
+  if (!jevEnabled()) throw new Error(JEV_OFF);
   const apiKey = loadApiKey();
   if (!apiKey) throw new Error("Jev unavailable: no TYPESAFE_API_KEY in env or ~/.config/typesafe/env (see the `jev` skill).");
   // Pinned: thresholds above were tuned on this version. Override with TYPESAFE_DEFAULT_MODEL.

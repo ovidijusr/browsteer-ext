@@ -218,3 +218,38 @@ describe("who may connect", () => {
     expect((await ask("links", {})).ok).toBe(true);
   });
 });
+
+// The hub under test runs with no BROWSTEER_JEV and an empty config dir, i.e. the default.
+describe("semantic targeting is off by default", () => {
+  const page = (tree: string) => ({ ...snapResult("https://a.example/one", 42), tree });
+
+  test("find still answers when the target names a control", async () => {
+    canned.snapshot = page('region\n  [1] button "Go"\n  [2] link "Invoices"');
+    const r = await ask("find", { target: "the Invoices link" });
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain("lexical");
+    expect(r.text).toContain("[2]");
+  });
+
+  test("find says so instead of calling out when nothing matches by name", async () => {
+    canned.snapshot = page('region\n  [1] button "Go"\n  [2] link "Invoices"');
+    const r = await ask("find", { target: "the thing that exports my data" });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("Semantic targeting is off");
+    expect(r.text).toContain("config.json");
+  });
+
+  test("pursue is unavailable and explains how to turn it on", async () => {
+    const r = await ask("pursue", { goal: "open the invoices page" });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("Semantic targeting is off");
+  });
+
+  test("a commitment-sounding control is not clicked without a judge", async () => {
+    canned.snapshot = page('region\n  [1] button "Delete account"\n  [2] link "Invoices"');
+    seenOps.length = 0;
+    const r = await ask("find", { target: "the Delete account button", act: "click" });
+    expect(seenOps.some((o) => o.op === "click")).toBe(false);
+    expect(r.text).toMatch(/irreversible|browser_click/i);
+  });
+});
