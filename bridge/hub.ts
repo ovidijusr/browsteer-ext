@@ -16,6 +16,11 @@ import type { ServerWebSocket } from "bun";
 
 const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
 
+/** What was typed into a field never goes into the action log — it may be a password. */
+function redact(v: unknown): string {
+  return `‹${String(v ?? "").length} chars›`;
+}
+
 /** Who may open a socket to the hub: extension pages/workers, or a local client that sends no Origin. */
 function originAllowed(origin: string | null): boolean {
   return !origin || /^(moz|chrome)-extension:\/\//.test(origin);
@@ -263,13 +268,13 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
     case "fill": try {
       if (p.type) {
         const r = await callExtension(ctl, "type", { ref: p.ref, value: p.value, commit: p.commit });
-        logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: r.stuck, detail: { how: r.how } });
+        logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: redact(p.value), ok: r.stuck, detail: { how: r.how } });
         return ok(`Typed into [${p.ref}] ${r.field} via ${r.how}: value now ${JSON.stringify(r.value)}${r.stuck ? "" : " ⚠ differs from what was typed"}.${noteUrl(ctl, r?.url)}`);
       }
       const r = await callExtension(ctl, "fill", { ref: p.ref, value: p.value });
-      logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: p.value, ok: true });
+      logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: redact(p.value), ok: true });
       return ok(`Filled [${p.ref}] with ${JSON.stringify(p.value)}.${noteUrl(ctl, r?.url)}`);
-    } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
+    } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: redact(p.value), ok: false, error: e.message }); return fail(e.message); }
     case "scan": try {
       const r = await callExtension(ctl, "scan", { ref: p.ref, step: p.step, limit: p.limit });
       const refuse = driftRefusal(ctl, "scan", r.url, prevMayNavigate);
@@ -474,7 +479,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
           op = "find"; label = `find ${JSON.stringify(st.find)}`;
           params = { target: st.find, act: typeof st.fill === "string" ? "fill" : st.click ? "click" : "none", value: st.fill, fresh: st.fresh };
           if (params.act === "none") params.act = "click"; // in a script a bare find means "click it"
-          label += params.act === "fill" ? ` ← ${JSON.stringify(st.fill)}` : " → click";
+          label += params.act === "fill" ? ` ← ${redact(st.fill)}` : " → click";
         } else if (typeof st.press === "string") { op = "press"; params = { key: st.press }; label = `press ${st.press}`; }
         else if (typeof st.navigate === "string") { op = "navigate"; params = { url: st.navigate }; label = `navigate ${st.navigate}`; }
         else if (typeof st.pursue === "string") { op = "pursue"; params = { goal: st.pursue, maxSteps: st.maxSteps }; label = `pursue ${JSON.stringify(st.pursue)}`; }
@@ -494,7 +499,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         try { const sn = await callExtension(ctl, "snapshot", { interactiveOnly: true, filters: listFilters(), chrome: true, collapse: true, dedup: true }); lastUrl = sn.url; tail = `\n\nFinal page (interactive only, ${sn.count} refs):\n${sn.tree}`; } catch {}
       }
       const total = Math.round(performance.now() - t0);
-      logAction({ tab_url: lastUrl, tool: "do", value: steps.map((x) => x.find ?? x.press ?? x.navigate ?? x.pursue ?? "wait").join(" | "), ok: stoppedAt == null, element_count: steps.length, detail: { steps, lines, stoppedAt, ms: total } });
+      logAction({ tab_url: lastUrl, tool: "do", value: steps.map((x) => x.find ?? x.press ?? x.navigate ?? x.pursue ?? "wait").join(" | "), ok: stoppedAt == null, element_count: steps.length, detail: { steps: steps.map((x) => (typeof x.fill === "string" ? { ...x, fill: redact(x.fill) } : x)), lines, stoppedAt, ms: total } });
       return (stoppedAt == null ? ok : fail)(`${stoppedAt == null ? `Done: ${steps.length} step${steps.length === 1 ? "" : "s"}` : `Stopped at step ${stoppedAt} of ${steps.length}`} in ${total} ms\nURL: ${lastUrl}\n${lines.join("\n")}${tail}`);
     }
     case "memos": {
