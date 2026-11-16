@@ -58,7 +58,7 @@ const reqById = new Map<string, ReqEntry>();
 function decodeBody(details: any): string | undefined {
   const rb = details.requestBody;
   if (!rb) return undefined;
-  if (rb.formData) return JSON.stringify(rb.formData);
+  if (rb.formData) return JSON.stringify(rb.formData).slice(0, 4000);
   const raw = rb.raw?.[0]?.bytes;
   if (!raw) return undefined;
   try { return new TextDecoder().decode(new Uint8Array(raw)).slice(0, 4000); } catch { return `<${raw.byteLength} bytes>`; }

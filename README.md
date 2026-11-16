@@ -1,96 +1,106 @@
 # Browsteer
 
-Let a local **Claude Code** instance drive your **real, logged-in** Firefox tab —
-click, fill, and read — over a token-efficient **accessibility snapshot** instead
-of raw HTML.
+Lets a local **Claude Code** session read and operate the pages open in your
+own **Chrome or Firefox** — click, fill, read — through a compact accessibility
+snapshot instead of raw HTML.
 
 ```
-Firefox extension        shared HUB (one daemon)        per-session MCP shims
- content.ts  ──ws:8787──▶  bridge/hub.ts  ◀──ws:8787/control──  bridge/mcp.ts ──stdio──▶ claude (session A)
- (a11y snapshot,           owns browser + filters         bridge/mcp.ts ──stdio──▶ claude (session B)
-  click/fill/read)         (~/.browsteer/browsteer.db)
+browser extension        hub (one local daemon)          per-session MCP shims
+ content script ─ws:8787─▶ bridge/hub.ts ◀─ws:8787─ bridge/mcp.ts ─stdio─▶ claude (session A)
+ (snapshot, click,         127.0.0.1 only                 bridge/mcp.ts ─stdio─▶ claude (session B)
+  fill, read)              ~/.browsteer/browsteer.db
 ```
 
-The bridge is split so it's lightweight and frictionless: a single **hub**
-daemon owns the WebSocket + the browser connection + the SQLite filters and
-**persists** across sessions; a thin **MCP shim** is what Claude spawns per
-session — it binds no port and just forwards `browser_*` calls to the hub,
-**lazily starting the hub** on first use. Many sessions share one hub.
+One **hub** daemon owns the browser connection and persists across sessions. A
+thin **MCP shim** is what Claude starts per session; it forwards `browser_*`
+calls to the hub and starts the hub on first use.
 
-## MVP scope
+Nothing leaves the computer except what Claude Code itself sends to Claude.
+[PRIVACY.md](PRIVACY.md) has the details, and
+[docs/PERMISSIONS.md](docs/PERMISSIONS.md) explains every permission the
+extension asks for.
 
-The **snapshot + action loop**: `browser_snapshot`, `browser_click`,
-`browser_fill`, `browser_read`. Learn→template→replay and booking-compare are
-later phases.
+## Setup
 
-## Setup on a new machine
+Requires [Bun](https://bun.sh) 1.3 or newer.
 
 ```sh
-# 1. Install Bun (>= 1.3) — https://bun.sh
-curl -fsSL https://bun.sh/install | bash
-
-# 2. Clone + install + build (extension/dist/ is generated, not committed)
-git clone git@github.com:ovidijusr/browsteer.git && cd browsteer
+git clone <this repository> browsteer && cd browsteer
 bun install
-bun run build
+bun run build          # → dist/chrome and dist/firefox
 
-# 3. Register the MCP shim with Claude Code (run from the repo root)
-claude mcp add browsteer -- bun run "$PWD/bridge/mcp.ts"
+# Register the bridge with Claude Code (run from the repository root)
+claude mcp add -s user browsteer -- bun run "$PWD/bridge/mcp.ts"
+
+# Optional: the /browse slash command
+mkdir -p ~/.claude/skills && cp -R skill/browse ~/.claude/skills/browse
 ```
 
-**4. Install the extension in Firefox:** download `browsteer-<version>.xpi` from
-[GitHub Releases](https://github.com/ovidijusr/browsteer/releases) and open it
-with Firefox — it's AMO-signed (unlisted channel), so it installs permanently
-and survives restarts. For development instead, load it temporarily via
-`about:debugging#/runtime/this-firefox` → *Load Temporary Add-on…* →
-`extension/manifest.json` (drops on restart). New releases: bump `version` in
-`extension/manifest.json`, `bun run sign` (AMO credentials), attach the signed
-`.xpi` to a new GitHub release.
+**Chrome** (116 or newer; Edge and Brave work the same way): open
+`chrome://extensions`, turn on *Developer mode*, choose *Load unpacked* and
+select `dist/chrome`.
 
-**5. Copy the `/browse` skill** to `~/.claude/skills/browse/` if you use the
-slash command (it lives in the user's skills dir, not this repo).
+**Firefox** (128 or newer): for a permanent install, sign the build with
+`bun run sign:firefox` (needs AMO API credentials in `WEB_EXT_API_KEY` /
+`WEB_EXT_API_SECRET`) and open the resulting `.xpi`. For a session-only install,
+open `about:debugging#/runtime/this-firefox`, choose *Load Temporary Add-on…*
+and select `dist/firefox/manifest.json`.
 
-> Port note: the hub listens on `:8787`. `BRIDGE_PORT` moves the bridge side
-> only — the extension hardcodes it in `extension/src/background.ts` and the
-> manifest CSP, so changing the port means editing those too.
+A setup page opens after install. It shows this browser's pairing key and turns
+green once the bridge is found.
 
-## Run it
+> The hub listens on `127.0.0.1:8787`. `BRIDGE_PORT` moves the bridge side only;
+> the extension has the port in `extension/src/background.ts` and in the
+> manifest CSP, so changing it means editing those too.
 
-**1. Start the extension dev loop** (bundler watch + Firefox auto-reload):
+## Use it
 
-```sh
-bun run dev
-```
-
-A dev Firefox launches with the extension loaded. Edit `extension/src/*.ts` →
-it rebuilds → Firefox reloads the add-on. (After a *content-script* change,
-refresh the target tab so the new script injects.)
-
-**2. Register the bridge with Claude Code** (one-time — Claude spawns the thin
-shim per session; the shim lazily starts the shared hub):
-
-```sh
-claude mcp add browsteer -- bun run "$PWD/bridge/mcp.ts"   # from the repo root
-```
-
-The hub persists across sessions (so the extension stays paired). To stop it:
-`bun run hub:stop` (or `bun run bridge/hub.ts --stop`).
-
-**3. Pair + drive.** Click the Browsteer toolbar icon → the popup shows a
-key like `bst-ab12-cd34` and a button that copies `/browse <key> ` to your
-clipboard. Paste it into Claude Code and add a task:
+Click the Browsteer toolbar button, copy the command, paste it into Claude Code
+and add a task:
 
 ```
-/browse bst-ab12-cd34 compare the prices in the flight results
+/browse bst-ab12-cd34 list the open pull requests on this page
 ```
 
-The `/browse` skill calls `browser_pair(key)`, then drives the page with
+The `/browse` skill calls `browser_pair(key)`, then works with
 `browser_snapshot` / `browser_click` / `browser_fill` / `browser_read`. Refs
-come from the latest snapshot and are invalid after navigation — re-snapshot
-after each action. For a form that won't submit, `browser_form` lists every
-control's live state (value, `*checked`, chosen option, required, error text,
-hidden `<select>`s behind custom dropdowns) and each submit's `*disabled` in one
-call.
+come from the latest snapshot and are invalid after navigation. For a form that
+won't submit, `browser_form` lists every control's live state (value,
+`*checked`, chosen option, required, error text, hidden `<select>`s behind
+custom dropdowns) and each submit's `*disabled` in one call.
+
+To stop the hub: `bun run hub:stop`. To cut off a paired session: *New key* in
+the popup.
+
+### Semantic targeting (optional, off by default)
+
+`browser_find`, `browser_pursue` and `browser_do` can locate controls from a
+description ("the export button next to the date range") by asking Jev, a
+TypeSafe model. That sends an outline of the current page to `api.typesafe.ai`,
+so it is **off** unless you turn it on:
+
+```sh
+echo '{"jev": true}' > ~/.browsteer/config.json     # plus TYPESAFE_API_KEY
+bun run hub:stop                                    # the next session restarts the hub
+```
+
+While off, `browser_find` still resolves targets that name a control exactly
+and ones it has learned before, both without any network call; `browser_pursue`
+is unavailable; and clicks on controls that sound irreversible are refused.
+
+## Develop
+
+```sh
+bun run dev            # Firefox: rebuild on save, auto-reload in a throwaway profile
+bun run dev chrome     # Chrome: rebuild dist/chrome on save; reload from chrome://extensions
+bun run typecheck
+bun test
+bun run package        # → artifacts/browsteer-{chrome,firefox}-<version>.zip
+```
+
+The version lives in `package.json`; the build writes it into both manifests.
+After a content-script change, reload the target tab so the new script is
+injected.
 
 ### Pairing model
 
@@ -102,7 +112,7 @@ drive that browser).
 
 > **MV3 gotcha:** the extension's `connect-src` CSP must list the bridge socket
 > (`ws://127.0.0.1:8787`) or the WebSocket is blocked *silently*. See
-> `extension/manifest.json`.
+> `extension/manifest.base.json`.
 
 ## The one knob that matters
 
@@ -157,20 +167,26 @@ wrong document. `browser_pin` with no `tabId` opts out for the session.
 
 | Path | Role |
 |------|------|
-| `bridge/index.ts` | WS server + MCP server (`browser_pair` + snapshot/click/fill/read) + keyed registry |
-| `bridge/db.ts` | `bun:sqlite` action log + filters (`~/.browsteer/browsteer.db`, `BROWSTEER_DB_DIR` overrides) |
-| `extension/src/snapshot.ts` | snapshot core — pure DOM-in/string-out, unit-tested under happy-dom |
+| `bridge/hub.ts` | the daemon: WebSocket server, pairing registry, every `browser_*` op |
+| `bridge/mcp.ts` | per-session MCP shim that forwards to the hub |
+| `bridge/jev.ts` | optional semantic targeting: questions, thresholds, opt-in switch |
+| `bridge/db.ts` | `bun:sqlite` action log, filters, memos (`~/.browsteer/browsteer.db`) |
+| `bridge/cli.ts` | run any single op from a shell |
+| `extension/manifest.base.json` | manifest shared by both browsers; `scripts/build.ts` adds the per-browser keys |
+| `extension/src/ext.ts` | one name for the WebExtensions API in both browsers |
+| `extension/src/background.ts` | socket to the hub, key registration, relays ops to the tab (event page in Firefox, service worker in Chrome) |
 | `extension/src/content.ts` | actions (click/fill/read/press), element picker, message plumbing |
-| `extension/src/background.ts` | WS client, key registration, relays ops to the active tab |
-| `extension/src/popup.ts` | shows the pairing key + copies `/browse <key>` |
-| `scripts/dev.ts` | bundler watch + `web-ext run` |
-| `test/mcp-client.ts` | self-contained E2E: spawns bridge → Firefox → drives the fixture |
-| `~/.claude/skills/browse/SKILL.md` | the `/browse` slash command |
+| `extension/src/snapshot.ts` | snapshot core — pure DOM-in/string-out, unit-tested under happy-dom |
+| `extension/src/fallback.ts` | hit-test scan, coordinate clicks, keyboard-style typing |
+| `extension/src/dialogs.ts`, `dialogs-main.ts` | alert/confirm/prompt handling; the second file is Chrome's page-world half |
+| `extension/src/popup.ts`, `welcome.ts`, `keyview.ts` | popup and setup page |
+| `scripts/build.ts`, `package.ts`, `dev.ts` | build, package, dev loop |
+| `skill/browse/SKILL.md` | the `/browse` slash command for Claude Code |
 
 ## Tests
 
 ```sh
-bun test                    # 30 unit + integration tests, no browser needed
+bun test                    # unit + integration tests, no browser needed
 bun run reduction           # before/after bytes+tokens for the reduction passes
 ```
 
@@ -179,12 +195,13 @@ bun run reduction           # before/after bytes+tokens for the reduction passes
 list, carrying the element counts observed in real use (31 gallery thumbs, a
 duplicated financing block, 12 map controls, 10 footer links). `test/hub.test.ts`
 exercises auto-pin and the drift refusal against a fake extension socket, so the
-targeting logic is covered without launching Firefox.
+targeting logic, the connection rules and the semantic-targeting default are
+covered without launching a browser.
 
 With a real browser:
 
 ```sh
-bun run test/serve.ts &     # booking-like fixture on :8080
+bun run test/serve.ts &     # fixture page on :8080
 bun run test/mcp-client.ts  # spawns bridge, launches Firefox, snapshots + acts
 bun run test/measure.ts     # snapshot vs raw DOM on your CURRENT active tab
 ```

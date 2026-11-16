@@ -1,57 +1,62 @@
-# Build instructions — Browsteer extension
+# Build instructions
 
-The extension's `dist/*.js` files are produced from the TypeScript in
-`extension/src/` using [Bun](https://bun.sh)'s bundler/minifier. No other tooling.
+Both extension packages are produced from the TypeScript in `extension/src/`
+with [Bun](https://bun.sh)'s bundler. No other tooling is involved.
 
-## Build environment
+## Environment
 
-- **OS:** macOS, Linux, or Windows (built/tested on macOS 15, arm64).
-- **Only required program: Bun ≥ 1.3** (built with **Bun 1.3.9**). Install it with:
+- macOS, Linux or Windows.
+- **Bun 1.3 or newer** (built and tested with 1.3.9). No Node.js needed.
   ```sh
-  curl -fsSL https://bun.sh/install | bash      # macOS / Linux
-  # or: npm i -g bun   |   Windows: powershell -c "irm bun.sh/install.ps1 | iex"
+  curl -fsSL https://bun.sh/install | bash          # macOS / Linux
+  powershell -c "irm bun.sh/install.ps1 | iex"      # Windows
   ```
-  No Node.js/npm required. The extension has **no runtime dependencies**; `bun install`
-  only fetches TypeScript type-definitions used at build time.
+- The extension has no runtime dependencies. `bun install` fetches type
+  definitions and the bridge's dependencies only.
 
-## One-step build script
-
-```sh
-./build.sh        # runs: bun install && bun run build:prod
-```
-
-## Reproduce the packaged add-on
-
-Requires **Bun ≥ 1.3** (the build was made with Bun 1.3.9).
+## Build
 
 ```sh
-bun install            # installs dev type-defs only (no runtime deps in the extension)
-bun run build:prod     # → extension/dist/{content,background,popup}.js  (minified)
+bun install
+bun run build          # dist/firefox and dist/chrome, minified
+bun run package        # also zips them into artifacts/
 ```
 
-`build:prod` runs exactly:
+`scripts/build.ts` does three things per browser:
 
-```sh
-bun build extension/src/content.ts extension/src/background.ts extension/src/popup.ts \
-  --outdir extension/dist --target browser --minify --sourcemap=none
-```
+1. Bundles each entry point to a classic (IIFE) script with `Bun.build`,
+   minified, no source maps.
+2. Copies `popup.html`, `welcome.html`, `ui.css` and `icons/` unchanged.
+3. Writes `manifest.json` from `extension/manifest.base.json`, adding the
+   version from `package.json` and the browser-specific keys.
 
-The add-on package is the `extension/` folder — `manifest.json`, `popup.html`,
-`icon.svg`, and the three generated `dist/*.js` files. To reproduce the exact
-zip that was submitted:
+## Source to output
 
-```sh
-bun run package        # = build:prod + `web-ext build --ignore-files "src/**"`
-```
+| Source | Output | In |
+|---|---|---|
+| `extension/src/background.ts` | `background.js` | both |
+| `extension/src/content.ts` (+ `snapshot.ts`, `fallback.ts`, `dialogs.ts`) | `content.js` | both |
+| `extension/src/popup.ts` (+ `keyview.ts`) | `popup.js` | both |
+| `extension/src/welcome.ts` (+ `keyview.ts`) | `welcome.js` | both |
+| `extension/src/dialogs-main.ts` (+ `dialogs.ts`) | `dialogs-main.js` | Chrome only |
+| `extension/src/ext.ts` | bundled into each of the above | both |
 
-## Source ↔ output mapping
+## What differs between the two packages
 
-| Source | Output in the add-on |
-|--------|----------------------|
-| `extension/src/content.ts`    | `extension/dist/content.js`    |
-| `extension/src/background.ts` | `extension/dist/background.js` |
-| `extension/src/popup.ts`      | `extension/dist/popup.js`      |
+| | Firefox | Chrome |
+|---|---|---|
+| Background | `background.scripts` (event page) | `background.service_worker` |
+| Dialog handling | exported into the page by the content script | `dialogs-main.js` as a `"world": "MAIN"` content script |
+| Extra manifest keys | `browser_specific_settings.gecko` | `minimum_chrome_version` |
 
-Each source file is self-contained (no local imports); the build only
-transpiles TypeScript → JavaScript and minifies. `browser` is the WebExtension
-global provided by the browser at runtime.
+Everything else, including every other line of JavaScript, is identical.
+
+## Release
+
+1. Bump `version` in `package.json`.
+2. `bun test && bun run typecheck && bun run lint:firefox`
+3. `bun run package`
+4. Firefox: `bun run sign:firefox` (AMO credentials in `WEB_EXT_API_KEY` /
+   `WEB_EXT_API_SECRET`) and attach the signed `.xpi` to the release.
+5. Chrome: upload `artifacts/browsteer-chrome-<version>.zip` to the Web Store,
+   or distribute the zip for *Load unpacked*.
