@@ -19,6 +19,7 @@
 //
 // They cost more tokens than the snapshot, so the snapshot stays the default
 // and these are reached for when an action visibly failed.
+import { createDialogs, relay, type DialogPolicy, type PolicyState } from "./dialogs";
 import {
   accessibleName, pointerName, hasPointer, refreshPointerRules, roleOf, setRefs, clean,
   REAL_CONTROL_SEL,
@@ -210,46 +211,32 @@ export function typeInto(target: Element, value: string, opts: { commit?: boolea
 }
 
 // ── Dialogs ──────────────────────────────────────────────────────────────────
-// alert() is information: answer it and report the text. confirm()/prompt() are
-// decisions: they stay native (the tab waits for a person) unless the caller set
-// a policy for the NEXT one with browser_dialogs. Policies are one-shot.
-export type DialogPolicy = "native" | "accept" | "dismiss";
-const dialogLog: string[] = [];
-let nextConfirm: DialogPolicy = "native";
-let nextPromptValue: string | null = null;
+// The handlers themselves are in ./dialogs.ts. Firefox installs them from here;
+// in Chrome they run in the page's world and these calls are relayed to them.
+export type { DialogPolicy };
 
-export function setDialogPolicy(p: { confirm?: DialogPolicy; prompt?: string | null }) {
-  if (p.confirm) nextConfirm = p.confirm;
-  if (p.prompt !== undefined) nextPromptValue = p.prompt;
-  return { confirm: nextConfirm, prompt: nextPromptValue };
+let local: ReturnType<typeof createDialogs> | null = null;
+let relayDoc: Document | null = null;
+
+export function setDialogPolicy(p: { confirm?: DialogPolicy; prompt?: string | null }): PolicyState {
+  if (local) return local.setPolicy(p);
+  const r = relayDoc && relay(relayDoc, { policy: p });
+  return r?.policy ?? { confirm: "native", prompt: null };
 }
 
 export function drainDialogs(): string[] {
-  return dialogLog.splice(0);
+  if (local) return local.drain();
+  return (relayDoc && relay(relayDoc, { drain: true })?.seen) || [];
 }
 
 export function installDialogHooks(win: Window): void {
   const exp = (globalThis as any).exportFunction as ((f: Function, t: object, o: { defineAs: string }) => void) | undefined;
-  if (!exp) return; // not Firefox content-script land (tests, other engines)
-  const nativeConfirm = win.confirm.bind(win);
-  const nativePrompt = win.prompt.bind(win);
+  if (!exp) { relayDoc = win.document; return; } // Chrome: dialogs-main.ts owns the hooks
+  const d = createDialogs(win);
   try {
-    exp((msg?: unknown) => { dialogLog.push(`alert ${JSON.stringify(String(msg ?? ""))} → OK (auto)`); }, win, { defineAs: "alert" });
-    exp((msg?: unknown) => {
-      const text = String(msg ?? "");
-      if (nextConfirm === "native") { const a = nativeConfirm(text); dialogLog.push(`confirm ${JSON.stringify(text)} → ${a ? "OK" : "Cancel"} (by user)`); return a; }
-      const a = nextConfirm === "accept";
-      nextConfirm = "native";
-      dialogLog.push(`confirm ${JSON.stringify(text)} → ${a ? "OK" : "Cancel"} (policy)`);
-      return a;
-    }, win, { defineAs: "confirm" });
-    exp((msg?: unknown, def?: unknown) => {
-      const text = String(msg ?? "");
-      if (nextPromptValue === null) { const a = nativePrompt(text, def == null ? undefined : String(def)); dialogLog.push(`prompt ${JSON.stringify(text)} → ${JSON.stringify(a)} (by user)`); return a; }
-      const a = nextPromptValue;
-      nextPromptValue = null;
-      dialogLog.push(`prompt ${JSON.stringify(text)} → ${JSON.stringify(a)} (policy)`);
-      return a;
-    }, win, { defineAs: "prompt" });
+    exp(d.alert, win, { defineAs: "alert" });
+    exp(d.confirm, win, { defineAs: "confirm" });
+    exp(d.prompt, win, { defineAs: "prompt" });
+    local = d;
   } catch { /* page froze its window props — leave natives in place */ }
 }
