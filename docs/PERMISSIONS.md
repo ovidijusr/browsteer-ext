@@ -13,7 +13,7 @@ and operate the pages the user has open, through a local bridge the user starts.
 | `storage` | `background.ts`, `content.ts`, `popup.ts` | Persist the pairing key, the user's access settings (allowed and blocked sites, read-only, when access ends) and the last element picked with the picker. Local only. |
 | `alarms` | `background.ts` | Wake the background every 15–30 s to reconnect to the local bridge after it restarts and to show on the toolbar badge when the access hour has ended. Timers alone do not survive background suspension. |
 | `webRequest` | `background.ts`: `onBeforeRequest`, `onCompleted` | Observe (never block or modify) requests made by sites the user allowed, while access is on, to keep an in-memory list of the last 300: method, address, status, content type. Request bodies are not requested (`requestBody` is not used). This lets the assistant find the API call a page made instead of scraping. |
-| Host access `<all_urls>` | content script on every page; `fetch` from the background | The user decides at run time which sites to allow, so the content script that reads and operates the page must be available on any site; it does nothing on a site until the user allows that site in the popup. Also lets requests the user asks for carry that site's cookies. |
+| Host access `<all_urls>` | content script on every page; `fetch` from the background | The user decides at run time which sites to allow, so the content script that reads and operates the page must be available on any site; it reads and operates nothing on a site until the user allows that site in the popup. (It does add one empty, hidden marker element for the working indicator, and in Chrome wraps the page's dialog functions, on every page.) Also lets requests the user asks for carry that site's cookies. |
 
 Chrome only:
 
@@ -34,12 +34,12 @@ Chrome only:
 ## Content security policy
 
 ```
-script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:8787 https://* http://*
+script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:8787 https://*:* http://*:*
 ```
 
 - No remote or inline scripts, no `eval`.
 - `ws://127.0.0.1:8787` is the local bridge.
-- `https://*` and `http://*` allow the background to fetch a URL the user's
+- `https://*:*` and `http://*:*` (any host, any port; without `:*` only ports 443 and 80 match, which breaks internal tools on other ports) allow the background to fetch a URL the user's
   session asks for (`browser_fetch`), for example a JSON export of the page
   being worked on. The extension makes no requests on its own.
 

@@ -13,7 +13,7 @@ import {
 } from "./snapshot";
 import { needsGuard } from "./risk";
 import {
-  scan, clickAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks, touchDialogs,
+  scan, clickAt, deepElementAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks, touchDialogs,
 } from "./fallback";
 
 installDialogHooks(window);
@@ -21,15 +21,18 @@ installDialogHooks(window);
 // ── "Claude is working here" ─────────────────────────────────────────────────
 // A bar across the top of the tab while requests are arriving, so it is never a
 // surprise that the page is being read or operated. It lives in a closed shadow
-// root on <html>: page styles cannot hide it, page scripts cannot read it, and
-// showing or hiding it does not count as a change to the page.
+// root on <html>: page styles cannot hide it, page scripts cannot read inside it,
+// and showing or hiding it does not count as a change to the page.
 const working = (() => {
   let bar: HTMLElement | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
     const host = document.createElement("browsteer-working");
     host.setAttribute("aria-hidden", "true");
-    host.style.cssText = "all:initial;position:fixed;inset:0 0 auto 0;height:0;z-index:2147483647;pointer-events:none";
+    // Inline and !important: a page stylesheet cannot restyle or hide it. (A page
+    // script can still remove the element; the toolbar badge does not depend on it.)
+    for (const [k, v] of Object.entries({ all: "initial", display: "block", visibility: "visible", opacity: "1", position: "fixed", top: "0", left: "0", right: "0", height: "0", "z-index": "2147483647", "pointer-events": "none" }))
+      host.style.setProperty(k, v, "important");
     const root = host.attachShadow({ mode: "closed" });
     bar = document.createElement("div");
     bar.style.cssText = "display:none;height:3px;background:#2447e0;box-shadow:0 0 0 1px rgba(255,255,255,.7)";
@@ -69,15 +72,30 @@ function pulse() {
   return { url: location.href, mutations, ready: document.readyState };
 }
 
-// browser_click is the one way to press something without a second opinion, so
-// controls that sound like a commitment need the caller to state that the user
-// agreed (confirm: true). The words are in ./risk.ts.
-function guardClick(el: Element | null, confirm: boolean): void {
+// browser_click and browser_press are the ways to activate something without a
+// second opinion, so controls that sound like a commitment need the caller to
+// state that the user agreed (confirm: true). The words are in ./risk.ts. A real
+// control with no name at all is treated the same way: an icon-only trash button
+// says nothing about what it does.
+const CONTROL_SEL = "a[href], button, input[type=submit], input[type=button], input[type=image], input[type=reset], [role=button], [role=link], [role=menuitem], [role=tab]";
+/** closest() that also climbs out of shadow roots. */
+function closestControl(el: Element): Element | null {
+  for (let cur: Element | null = el; cur; ) {
+    const hit = cur.closest(CONTROL_SEL);
+    if (hit) return hit;
+    const root = cur.getRootNode();
+    cur = root instanceof ShadowRoot ? root.host : null;
+  }
+  return null;
+}
+function guardClick(el: Element | null, confirm: boolean, how = "browser_click({ ref, confirm: true })"): void {
   if (confirm || !el) return;
-  const control = el.closest("a, button, input, select, [role=button], [role=link], [role=menuitem], [role=tab]") ?? el;
-  const name = accessibleName(control) || clean(control.textContent).slice(0, 60);
-  if (!name || !needsGuard({ role: roleOf(control), name })) return;
-  throw new Error(`“${name}” sounds like an action that cannot be undone, so it was not clicked. Ask the user; if they agree, repeat with browser_click({ ref, confirm: true }).`);
+  const control = closestControl(el);
+  const subject = control ?? el;
+  const name = accessibleName(subject) || clean(subject.textContent).slice(0, 60);
+  if (control ? !needsGuard({ role: roleOf(control), name }) : !(name && needsGuard({ role: "link", name }))) return;
+  const label = name ? `“${name}”` : "An unnamed button";
+  throw new Error(`${label} ${name ? "sounds like" : "could be"} an action that cannot be undone, so it was not activated. Ask the user; if they agree, repeat with ${how}.`);
 }
 
 function doClick(ref: number, confirm = false) {
@@ -103,7 +121,7 @@ function hitTarget(el: HTMLElement, x: number, y: number): HTMLElement {
 }
 
 function doClickAt(x: number, y: number, confirm = false) {
-  guardClick(document.elementFromPoint(x, y), confirm);
+  guardClick(deepElementAt(document, x, y), confirm, "browser_click({ x, y, confirm: true })");
   const before = mutations;
   const r = clickAt(document, x, y);
   return { url: location.href, mutations: before, pulse: true, hit: r.hit };
@@ -180,7 +198,8 @@ function doRead(ref: number) {
 async function pageFetch(p: any) {
   const w: any = globalThis as any;
   const method = String(p.method ?? "GET").toUpperCase();
-  const init = { method, credentials: "include", headers: p.headers ?? {}, body: method === "GET" || method === "HEAD" ? undefined : p.body };
+  // No redirects, for the same reason as the background fetch: the first hop is the only one that was checked.
+  const init = { method, credentials: "include", headers: p.headers ?? {}, body: method === "GET" || method === "HEAD" ? undefined : p.body, redirect: p.followRedirects === true ? "follow" : "error" };
   // Objects handed to the page's fetch must live in the page compartment (cloneInto), else
   // "Permission denied to access property 'constructor'". Read the body as text — a page-side
   // ArrayBuffer is just as unreachable. (Text-only is fine: this op exists for page APIs.)
@@ -221,8 +240,17 @@ const KEYS: Record<string, string> = {
   Enter: "Enter", Tab: "Tab", Escape: "Escape", Backspace: "Backspace",
   ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
 };
-function doPress(key: string, ref?: number) {
+function doPress(key: string, ref?: number, confirm = false) {
   const el = ((ref != null ? resolve(ref) : document.activeElement) as HTMLElement) ?? document.body;
+  // Enter and Space activate things: the focused control, or the form the field is in.
+  if (key === "Enter" || key === " " || key === "Space") {
+    const how = "browser_press({ key, ref, confirm: true })";
+    if (closestControl(el)) guardClick(el, confirm, how);
+    else if (key === "Enter" && el instanceof HTMLInputElement && el.form) {
+      const submit = el.form.querySelector("button:not([type=button]):not([type=reset]), input[type=submit], input[type=image]");
+      if (submit) guardClick(submit, confirm, how);
+    }
+  }
   el.focus?.();
   const code = key.length === 1 ? `Key${key.toUpperCase()}` : (KEYS[key] ?? key);
   const keyCode =
@@ -370,7 +398,7 @@ function handleOp(op: string, params: any): unknown {
     case "options": return doOptions(params.ref);
     case "read": return doRead(params.ref);
     case "html": return doHtml(params.ref, params.clean ?? true, params.up ?? 0, params.offset ?? 0, params.maxBytes ?? 50_000);
-    case "press": return doPress(params.key, params.ref);
+    case "press": return doPress(params.key, params.ref, params.confirm === true);
     case "pick": return startPicker(); // returns a Promise (waits for the user)
     case "pageFetch": return pageFetch(params);
     default: throw new Error(`Unknown op '${op}'`);
@@ -385,6 +413,13 @@ ext.runtime.onMessage.addListener(
     if (!msg || typeof msg.op !== "string") return false; // not for us (e.g. popup msgs)
     // Only the background relays ops; a message from anywhere else is not one.
     if ((_sender as any)?.id !== ext.runtime.id || (_sender as any)?.tab) return false;
+    // The background checked this tab's site a moment ago; if the page has since
+    // moved to another host, that check no longer describes it.
+    const expect = msg.params?.expectHost;
+    if (typeof expect === "string" && expect !== location.hostname.toLowerCase()) {
+      sendResponse({ ok: false, error: `The tab moved to ${location.hostname} while this request was on its way, so nothing was done. Take a new browser_snapshot.` });
+      return false;
+    }
     if (msg.op !== "pick") { working(); touchDialogs(); }
     // handleOp may return a value or a Promise (pick waits for a click) — await both.
     Promise.resolve()

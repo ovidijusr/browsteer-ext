@@ -86,7 +86,7 @@ export function ensureToken(): string {
   return t;
 }
 export function tokenMatches(expected: string, given: unknown): boolean {
-  if (typeof given !== "string") return false;
+  if (typeof given !== "string" || expected.length < 32) return false; // an unset token matches nothing
   const a = Buffer.from(expected), b = Buffer.from(given);
   return a.length === b.length && timingSafeEqual(a, b);
 }
@@ -110,20 +110,8 @@ export function extensionAllowed(origin: string, allowed: string[]): "yes" | "fi
 }
 
 // ── Sites ────────────────────────────────────────────────────────────────────
-const MULTI_PART_TLD = /\.(co|com|org|net|gov|ac|edu)\.[a-z]{2}$/;
-/** Registrable domain, approximately: enough to tell app.example.com and example.com are one site. */
-export function siteOf(url: string | null | undefined): string | null {
-  if (!url) return null;
-  let host: string;
-  try { const u = new URL(url); if (!/^https?:$/.test(u.protocol)) return null; host = u.hostname.toLowerCase(); } catch { return null; }
-  if (/^[\d.]+$/.test(host) || host.includes(":") || !host.includes(".")) return host; // IP or single label
-  const parts = host.split(".");
-  return parts.slice(MULTI_PART_TLD.test(host) ? -3 : -2).join(".");
-}
-export function sameSite(a: string | null | undefined, b: string | null | undefined): boolean {
-  const sa = siteOf(a), sb = siteOf(b);
-  return !!sa && sa === sb;
-}
+// One definition, shared with the extension, which enforces the lock for actions.
+export { siteOf, sameSite } from "../extension/src/site";
 
 // ── Downloads ────────────────────────────────────────────────────────────────
 /** Resolve a saveTo path; it must land inside the download folder. Bare names are placed there. */

@@ -1,5 +1,5 @@
-# Runs on every push and pull request: the same checks as a release, in the
-# same order, so nothing reaches main that could not be shipped.
+# Runs on every pull request and on every push to main: the same checks as a
+# release, in the same order, so nothing reaches main that could not be shipped.
 name: CI
 
 on:
@@ -54,7 +54,7 @@ jobs:
         run: bun run scripts/check-manifest.ts
 
       - name: Lint the Firefox build
-        run: bunx web-ext@8 lint --source-dir dist/firefox --self-hosted
+        run: bunx web-ext@8.10.0 lint --source-dir dist/firefox --self-hosted
 
       - name: Package
         run: bun run package

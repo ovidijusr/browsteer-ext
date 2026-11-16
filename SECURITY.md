@@ -26,15 +26,15 @@ in the popup. Neither Claude nor the bridge has a message that alters them.
 | Sites | none allowed | A page is readable and operable only if its site is allowed and not blocked. Other tabs are not even listed by name. |
 | Read only | off | When on: snapshots and reads only; no clicks, typing, navigation or non-GET requests. |
 | Passwords | always | Password field contents are masked in snapshots, form reports, reads and HTML. |
-| Commitment buttons | always | Controls named like delete, pay, send, sign out are not pressed by `browser_click` unless the call carries `confirm: true`, which Claude is instructed to set only after asking. |
-| Working indicator | always | A bar across the top of the tab while requests arrive. |
+| Commitment buttons | always | Controls named like delete, pay, send, sign out, and real buttons with no name at all, are not activated by `browser_click` (by ref or by coordinates, including inside web components) or by Enter/Space in `browser_press`, unless the call carries `confirm: true`, which Claude is instructed to set only after asking. Enter in a form field is judged by the form's submit button. |
+| Working indicator | always | A bar across the top of the tab while requests arrive. Page styles cannot hide it; a page script could remove the element, so the toolbar badge is the indicator to trust. |
 
 These are enforced in the bridge:
 
 | Limit | Default | Effect |
 |---|---|---|
-| One site per session | on | A session stays on the site of the first page it touched. Reads elsewhere are refused with the content withheld; navigation elsewhere is refused before it is sent. Lifted once by *Let Claude switch site* in the popup. |
-| `browser_fetch` | GET/HEAD, same site | No state-changing requests, no requests to other sites, and `saveTo` only inside one download folder. |
+| One site per session | on | A session stays on the site of the first page it touched. The bridge names that site with every request and the extension refuses to read, click, type or navigate in a tab on any other site, before anything happens. Lifted once by *Let Claude switch site* in the popup. |
+| `browser_fetch` | GET/HEAD, same site, no redirects | No state-changing requests, no requests to other sites, and redirects are not followed, so a link on the allowed site cannot carry cookies or data elsewhere. `saveTo` only writes inside one download folder. |
 | Log | 30 days, owner-only | Typed text is logged as a length; request bodies are never captured. |
 
 ## Prompt injection
@@ -58,6 +58,9 @@ acceptable.
 - **Malware running as you.** A process with your user's rights can read the
   token, the browser profile and everything else. Browsteer adds no exposure
   there, and no protection.
+- **"Site" is an approximation.** It is the registrable domain worked out without the full public-suffix list: `app.example.com` and `example.com` are one site; subdomains of common hosting platforms (`github.io`, `vercel.app` and similar, listed in `extension/src/site.ts`) are separate sites. A platform missing from that list is treated as one site.
+- **The first extension to connect is trusted.** On a fresh install, start the browser with Browsteer before anything else on the machine could register. A local program that fakes an extension address can only register its own key; it cannot answer requests sent to your browser.
+- **Sites can tell the extension is installed**, even while it is locked: an empty marker element is added to pages, and in Chrome the dialog functions are wrapped.
 - **A leaked pairing key plus local access.** Both are needed; *New key*
   invalidates the key at once.
 - **What Claude does with what it reads.** Page content returned to the session

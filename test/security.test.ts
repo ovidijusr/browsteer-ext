@@ -61,3 +61,15 @@ describe("download folder", () => {
     expect("error" in resolveSavePath(dir, dir)).toBe(true);
   });
 });
+
+describe("shared hosting is not one site", () => {
+  test("each subdomain of a hosting platform is its own site", () => {
+    expect(siteOf("https://alice.github.io/x")).toBe("alice.github.io");
+    expect(sameSite("https://alice.github.io/", "https://evil.github.io/")).toBe(false);
+    expect(sameSite("https://a.vercel.app/", "https://b.vercel.app/")).toBe(false);
+    expect(sameSite("https://docs.alice.github.io/", "https://alice.github.io/")).toBe(true);
+  });
+  test("an unset token matches nothing, not even an empty string", () => {
+    expect(tokenMatches("", "")).toBe(false);
+  });
+});

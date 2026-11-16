@@ -36,8 +36,9 @@ type Sock = ServerWebSocket<SockData>;
 
 const browsers = new Map<string, Sock>(); // key → extension socket
 const controllers = new Set<Controller>();
-const TOKEN = process.argv.includes("--stop") ? "" : ensureToken();
-const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+// Set once the port is ours: a second hub that loses the race must not rewrite the token.
+let TOKEN = "";
+const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>; sock: Sock }>();
 let seq = 0;
 // alert()/confirm()/prompt() text the content script answered or saw; appended to the next reply.
 const dialogNotes: string[] = [];
@@ -102,13 +103,17 @@ function targetSocket(ctl: Controller): Sock {
 function callExtension(ctl: Controller, op: string, params: Record<string, unknown> = {}, timeoutMs = CALL_TIMEOUT_MS): Promise<any> {
   let sock: Sock;
   try { sock = targetSocket(ctl); } catch (e) { return Promise.reject(e); }
-  const id = `${op}-${++seq}`;
+  const id = `${op}-${++seq}-${crypto.randomUUID()}`; // unguessable, and answered only by the socket it was sent to
   // An explicit tabId in the call (CLI, scripts) beats the controller's pin — a fresh
   // controller auto-pins to whatever tab is focused, which sent CLI ops to the wrong tab.
-  const sendParams = ctl.pinnedTabId != null && op !== "tabs" && params.tabId == null ? { ...params, tabId: ctl.pinnedTabId } : params;
+  const pinned = ctl.pinnedTabId != null && op !== "tabs" && params.tabId == null ? { ...params, tabId: ctl.pinnedTabId } : params;
+  // The extension checks the tab against the session's site BEFORE doing anything,
+  // so a click, a keystroke or a read with no address in its reply cannot land on
+  // another site either. siteCheck below still covers the first op of a session.
+  const sendParams = ctl.site && loadConfig().siteLock ? { ...pinned, lockSite: ctl.site } : pinned;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Extension timed out after ${timeoutMs}ms on '${op}'. If the page opened a confirm()/prompt() box it is waiting for an answer: answer it in the browser, or call browser_dialogs({confirm:"accept"|"dismiss"}) and redo the action.`)); }, timeoutMs);
-    pending.set(id, { resolve: (r: any) => { const refuse = siteCheck(ctl, op, r?.url); refuse ? reject(new Error(refuse)) : resolve(r); }, reject, timer });
+    pending.set(id, { resolve: (r: any) => { const refuse = siteCheck(ctl, op, r?.url); refuse ? reject(new Error(refuse)) : resolve(r); }, reject, timer, sock });
     sock.send(JSON.stringify({ id, op, params: sendParams }));
   });
 }
@@ -119,6 +124,8 @@ function callExtension(ctl: Controller, op: string, params: Record<string, unkno
 // here, whatever the model decides. Only the person can lift it, from the popup.
 // Results of actions (a click that followed a link) still come back, so Claude
 // learns where it ended up; the next read on the foreign site is what is refused.
+// (The extension refuses to START an action on a foreign site; what is exempt here
+// is only the reply to an action that began at home and ended up elsewhere.)
 const ACTION_RESULT = new Set(["click", "press", "fill", "select", "type", "pulse", "navigate", "dialogs", "pick"]);
 function siteCheck(ctl: Controller, op: string, url: string | undefined): string | null {
   const site = siteOf(url);
@@ -336,7 +343,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
       }
       ctl.pinnedTabId = p.tabId; ctl.autoPinned = false; ctl.noAutoPin = false; ctl.lastUrl = null;
       return ok(`Pinned to tab ${p.tabId}. Actions target it regardless of focus.`);
-    case "press": try { const r = await callExtension(ctl, "press", { key: p.key, ref: p.ref }); logAction({ tab_url: r?.url, tool: "press", value: p.key, ref: p.ref ?? null, ok: true }); return ok(`Pressed ${p.key}.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "press", value: p.key, ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
+    case "press": try { const r = await callExtension(ctl, "press", { key: p.key, ref: p.ref, confirm: p.confirm === true }); logAction({ tab_url: r?.url, tool: "press", value: p.key, ref: p.ref ?? null, ok: true }); return ok(`Pressed ${p.key}.${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "press", value: p.key, ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
     case "pick": try {
       const r = await callExtension(ctl, "pick", {}, 120_000);
       if (r?.cancelled) return ok("Pick cancelled (Esc).");
@@ -370,7 +377,9 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         if ("error" in sp) return fail(sp.error);
         savePath = sp.path;
       }
-      const r = await callExtension(ctl, "fetch", { url: p.url, headers: p.headers ?? {}, method, body: p.body, fromPage: p.fromPage === true, tabId: p.tabId }, 120_000);
+      const r = await callExtension(ctl, "fetch", { url: p.url, headers: p.headers ?? {}, method, body: p.body, fromPage: p.fromPage === true, tabId: p.tabId, followRedirects: cfg.fetchAnySite }, 120_000);
+      if (!cfg.fetchAnySite && r.finalUrl && siteOf(r.finalUrl) !== ctl.site)
+        return fail(`The request ended on ${siteOf(r.finalUrl) ?? r.finalUrl}, outside ${ctl.site}; its content was discarded.`);
       const buf = Buffer.from(r.bodyBase64 ?? "", "base64");
       const isText = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded)|.*\+(json|xml))/i.test(r.contentType ?? "");
       let head = `HTTP ${r.status} ${r.contentType || "(no content-type)"} ${buf.length} bytes` + (r.finalUrl && r.finalUrl !== p.url ? `\n→ ${r.finalUrl}` : "");
@@ -489,7 +498,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
         if (act === "fill") {
           const f = await timed("act", () => callExtension(ctl, "fill", { ref: top.ref, value: p.value }));
           ctl.lastOpMayNavigate = true;
-          logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "filled", fillValue: p.value } });
+          logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "filled", fillValue: redact(p.value) } });
           return ok(`${header}\nFilled [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}) with ${JSON.stringify(p.value)}.${noteUrl(ctl, f?.url)}\nRunner-up: ${r.ranked[1] ? `[${r.ranked[1].ref}] ${JSON.stringify(r.ranked[1].name)} ${pct(r.ranked[1].p)}` : "none"}.`);
         }
         const { g, asked } = await timed("guard", () => maybeGuard(top, target, snap.url));
@@ -655,7 +664,7 @@ if (process.argv.includes("--stop")) {
           }
           // The person chose "Let Claude switch site": sessions paired with this browser may start over on a new site.
           if (msg.type === "unlock" && ws.data.role === "extension") { for (const c of controllers) if (c.activeKey === ws.data.key) c.site = null; return; }
-          if (ws.data.role === "extension") { const pr = pending.get(msg.id); if (!pr) return; clearTimeout(pr.timer); pending.delete(msg.id); if (msg.ok) { if (Array.isArray(msg.result?._dialogs)) dialogNotes.push(...msg.result._dialogs); pr.resolve(msg.result); } else pr.reject(new Error(msg.error ?? "unknown extension error")); return; }
+          if (ws.data.role === "extension") { const pr = pending.get(msg.id); if (!pr || pr.sock !== ws) return; clearTimeout(pr.timer); pending.delete(msg.id); if (msg.ok) { if (Array.isArray(msg.result?._dialogs)) dialogNotes.push(...msg.result._dialogs); pr.resolve(msg.result); } else pr.reject(new Error(msg.error ?? "unknown extension error")); return; }
           if (ws.data.role === "control" && typeof msg.op === "string") { execOp(ws.data.ctl!, msg.op, msg.params ?? {}).then((r) => { const text = dialogNotes.length ? `${r.text}\n⚠ Page dialog${dialogNotes.length > 1 ? "s" : ""}: ${dialogNotes.splice(0).join(" · ")}` : r.text; try { ws.send(JSON.stringify({ id: msg.id, ok: !r.isError, text })); } catch {} }); return; }
         },
         close(ws) {
@@ -664,6 +673,7 @@ if (process.argv.includes("--stop")) {
         },
       },
     });
+    TOKEN = ensureToken();
     console.error(`[hub] listening on ws://127.0.0.1:${WS_PORT}`);
     console.error(`[hub] semantic targeting (Jev): ${jevEnabled() ? "on — page outlines go to api.typesafe.ai on find/pursue" : "off"}`);
     if (jevEnabled()) warm().then(() => console.error("[hub] jev connection warm")); // first find should not pay the TLS handshake
@@ -672,6 +682,7 @@ if (process.argv.includes("--stop")) {
     setInterval(() => { if (browsers.size) warm(); }, 25_000);
     { const n = pruneActions(loadConfig().logDays * 86_400_000); if (n) console.error(`[hub] pruned ${n} old action log row(s)`); }
     lockDownDataDir(dbFiles());
+    setInterval(() => pruneActions(loadConfig().logDays * 86_400_000), 6 * 3_600_000); // the hub runs for weeks
     { const n = pruneMemos(MEMO.ttlDays * 86_400_000); if (n) console.error(`[hub] pruned ${n} stale memo(s)`); }
   } catch {
     console.error(`[hub] port ${WS_PORT} busy — another hub is running; exiting.`);

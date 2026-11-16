@@ -24,7 +24,7 @@ function openControl(): Promise<void> {
     const sock = new WebSocket(HUB_URL);
     const to = setTimeout(() => { try { sock.close(); } catch {} reject(new Error("connect timeout")); }, 2000);
     sock.onopen = () => { clearTimeout(to); sock.send(JSON.stringify({ type: "hello", role: "control", token: readToken() })); ws = sock; resolve(); };
-    sock.onmessage = (ev) => { let m: any; try { m = JSON.parse(String(ev.data)); } catch { return; } if (m.type === "denied") { console.error(`[browsteer] hub refused this session: ${m.reason}`); return; } const p = pending.get(m.id); if (!p) return; clearTimeout(p.timer); pending.delete(m.id); p.resolve(m); };
+    sock.onmessage = (ev) => { let m: any; try { m = JSON.parse(String(ev.data)); } catch { return; } if (m.type === "denied") { console.error(`[browsteer] hub refused this session: ${m.reason}`); for (const [id, w] of pending) { clearTimeout(w.timer); pending.delete(id); w.resolve({ id, ok: false, text: `The Browsteer hub refused this session: ${m.reason} Restart the hub (bun run hub:stop) and try again.` }); } return; } const p = pending.get(m.id); if (!p) return; clearTimeout(p.timer); pending.delete(m.id); p.resolve(m); };
     sock.onclose = () => { if (ws === sock) ws = null; };
     sock.onerror = () => { clearTimeout(to); reject(new Error("connect error")); };
   });
@@ -286,7 +286,7 @@ tool("browser_press", {
     "Dispatch a key to a [ref] (or the focused element) — e.g. 'Enter' to commit an " +
     "autocomplete, 'ArrowDown' to move a dropdown highlight, 'Escape' to close. Keys: " +
     "Enter, Tab, Escape, ArrowUp/Down/Left/Right, Backspace, or a single character.",
-  inputSchema: { key: z.string().describe("Key name (Enter, ArrowDown, …) or a single character"), ref: z.number().int().optional().describe("Target element ref; omit to use the focused element") },
+  inputSchema: { key: z.string().describe("Key name (Enter, ArrowDown, …) or a single character"), ref: z.number().int().optional().describe("Target element ref; omit to use the focused element") , confirm: z.boolean().optional().describe("Enter or Space on a control that sounds irreversible (or in a form whose submit button does) is refused unless this is true. Set it only after the user agreed to this specific action.") },
 });
 
 tool("browser_pick", {

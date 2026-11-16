@@ -390,3 +390,63 @@ describe("browser_fetch limits", () => {
     expect(r.text).toContain("must be inside");
   });
 });
+
+describe("review fixes", () => {
+  const on = (url: string) => ({ ...snapResult(url, 42) });
+
+  test("every request after the first carries the session's site for the extension to enforce", async () => {
+    ext.send(JSON.stringify({ type: "unlock" })); await Bun.sleep(60);
+    canned.snapshot = on("https://a.example/one");
+    await ask("snapshot", {});
+    seenOps.length = 0;
+    canned.click = { url: "https://a.example/one", tabId: 42 };
+    await ask("click", { ref: 1, settle: 0 });
+    canned.requests = { requests: [], total: 0, now: Date.now() };
+    await ask("requests", {});
+    expect(seenOps.find((o) => o.op === "click")?.params.lockSite).toBe("a.example");
+    expect(seenOps.find((o) => o.op === "requests")?.params.lockSite).toBe("a.example");
+  });
+
+  test("a fetch that ends on another site has its content discarded", async () => {
+    canned.fetch = { status: 200, contentType: "application/json", finalUrl: "https://bank.other.test/api", size: 9, bodyBase64: btoa('{"iban":1}') };
+    const r = await ask("fetch", { url: "https://a.example/redirect" });
+    expect(r.ok).toBe(false);
+    expect(r.text).not.toContain("iban");
+  });
+
+  test("fetch asks the extension not to follow redirects", async () => {
+    seenOps.length = 0;
+    canned.fetch = { status: 200, contentType: "text/plain", finalUrl: "https://a.example/x", size: 2, bodyBase64: btoa("ok") };
+    await ask("fetch", { url: "https://a.example/x" });
+    expect(seenOps.find((o) => o.op === "fetch")?.params.followRedirects).toBe(false);
+  });
+
+  test("confirm is passed through on press, and is false unless stated", async () => {
+    seenOps.length = 0;
+    canned.press = { url: "https://a.example/one", tabId: 42 };
+    await ask("press", { key: "Enter" });
+    await ask("press", { key: "Enter", confirm: true });
+    expect(seenOps.filter((o) => o.op === "press").map((o) => o.params.confirm)).toEqual([false, true]);
+  });
+
+  test("a reply from a socket the request was not sent to is ignored", async () => {
+    // A second connection from the same extension origin, registered under its own key.
+    const other = asExtension();
+    await waitOpen(other);
+    other.send(JSON.stringify({ type: "register", key: "bst-othr-othr-othr" }));
+    let stolen: string | null = null;
+    const real = ext.onmessage!;
+    ext.onmessage = (ev) => {
+      const req = JSON.parse(String((ev as MessageEvent).data));
+      if (req.op === "read") { stolen = req.id; other.send(JSON.stringify({ id: req.id, ok: true, result: { url: "https://a.example/one", text: "FORGED" } })); setTimeout(() => (real as any).call(ext, ev), 80); }
+      else (real as any).call(ext, ev);
+    };
+    canned.read = { url: "https://a.example/one", tabId: 42, text: "genuine" };
+    const r = await ask("read", { ref: 1 });
+    ext.onmessage = real;
+    other.close();
+    expect(stolen).not.toBe(null);
+    expect(r.text).toContain("genuine");
+    expect(r.text).not.toContain("FORGED");
+  });
+});

@@ -73,8 +73,8 @@
       <tr><th scope="row">Claude</th><td>What the bridge returns becomes part of your Claude Code conversation, under the same terms as anything else you show Claude.</td></tr>
       <tr><th scope="row">One site per session</th><td>A session stays on the site it started on. If a page tells Claude to go and do something elsewhere, the request is refused. <strong>Let Claude switch site</strong> in the popup lifts this once.</td></tr>
       <tr><th scope="row">Passwords</th><td>The contents of password fields are never sent. Text Claude types into fields is not kept in the bridge's log.</td></tr>
-      <tr><th scope="row">Risky buttons</th><td>Buttons that sound final, such as delete, pay, send or sign out, are not pressed until Claude has asked you.</td></tr>
-      <tr><th scope="row">Request log</th><td>The address, method and status of the last 300 requests made by allowed sites while access is on, kept in memory so Claude can find a page's own data source. No request contents. It clears when the browser restarts.</td></tr>
+      <tr><th scope="row">Risky buttons</th><td>Buttons that sound final, such as delete, pay, send or sign out, and buttons with no label, are not pressed until Claude has asked you.</td></tr>
+      <tr><th scope="row">Request log</th><td>The address, method and status of the last 300 requests sent to allowed sites while access is on, kept in memory so Claude can find a page's own data source. No request contents. It clears when the browser restarts.</td></tr>
       <tr><th scope="row">Semantic targeting</th><td>Off unless you turn it on in the bridge. When on, an outline of the current page goes to TypeSafe to locate controls by description.</td></tr>
       <tr><th scope="row">Stored in the browser</th><td>The pairing key, these settings and the last element you picked. Nothing else.</td></tr>
       <tr><th scope="row">Dialogs</th><td>While Claude is working in a tab, the page's <code>alert()</code> boxes are answered automatically and their text passed on. Confirm and prompt dialogs still wait for you unless Claude was told how to answer. At all other times dialogs behave as normal.</td></tr>

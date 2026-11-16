@@ -14,7 +14,7 @@
     "mcp": "bun run bridge/mcp.ts",
     "hub": "bun run bridge/hub.ts",
     "hub:stop": "bun run bridge/hub.ts --stop",
-    "lint:firefox": "bun run build:firefox && bunx web-ext lint --source-dir dist/firefox --self-hosted",
+    "lint:firefox": "bun run build:firefox && bunx web-ext@8.10.0 lint --source-dir dist/firefox --self-hosted",
     "package": "bun run scripts/package.ts",
     "sign:firefox": "bun run build:firefox && bunx web-ext sign --source-dir dist/firefox --artifacts-dir artifacts --channel unlisted"
   },

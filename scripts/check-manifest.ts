@@ -8,7 +8,7 @@ const ROOT = new URL("..", import.meta.url).pathname;
 const ALLOWED = {
   permissions: ["alarms", "storage", "tabs", "webRequest"],
   host_permissions: ["<all_urls>"],
-  csp: /^script-src 'self'; object-src 'self'; connect-src ws:\/\/127\.0\.0\.1:\d+ https:\/\/\* http:\/\/\*$/,
+  csp: /^script-src 'self'; object-src 'self'; connect-src ws:\/\/127\.0\.0\.1:\d+ https:\/\/\*:\* http:\/\/\*:\*$/,
 };
 
 let bad = 0;

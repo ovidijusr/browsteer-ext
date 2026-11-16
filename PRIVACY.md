@@ -24,7 +24,7 @@ keeps, and what leaves the machine.
 |---|---|
 | Reads | The page in the tab Claude is working in, if its site is allowed: visible text, controls, links and, on request, HTML. Titles and addresses of tabs on allowed sites. Password field contents are never included. |
 | Acts | Clicks, typing, key presses, navigation and same-site requests in that tab, using the sessions you are signed in to. |
-| Keeps in memory | The address, method, status and content type of the last 300 requests made by allowed sites while access is on, so Claude can find a page's own API. No request or response contents. Cleared when the browser or the extension restarts. Never written to disk. |
+| Keeps in memory | The address, method, status and content type of the last 300 requests sent to allowed sites, from any tab, while access is on, so Claude can find a page's own API. No request or response contents. Cleared when the browser or the extension restarts. Never written to disk. |
 | Stores | In extension storage: the pairing key, your access settings (allowed and blocked sites, read-only, when access ends) and the selector of the last element you picked. |
 | Sends | Only to the local bridge, and only in reply to a request from it. |
 | Dialogs | For one minute after each request from Claude, a page's `alert` is answered automatically and its text reported, so a dialog cannot freeze the tab; `confirm` and `prompt` still wait for you unless Claude set an answer for the next one. At all other times dialogs are the browser's own. |
@@ -37,7 +37,7 @@ browser's extension settings.
 | What | Detail |
 |---|---|
 | Network | Listens on `127.0.0.1:8787`. Accepts the one extension it is bound to, and local clients that present the secret in `~/.browsteer/token`. Sockets opened by web pages are refused. |
-| Stores | `~/.browsteer/browsteer.db` (SQLite): an action log (time, page address, tool, element reference, outcome), saved snapshot filters, and learned "target → control" names per site. Text typed into fields is logged as a length only. Rows older than 30 days are removed. The folder and its files are readable by your user only. Delete the file to clear everything. |
+| Stores | `~/.browsteer/browsteer.db` (SQLite): an action log (time, page address, tool, element reference, outcome), saved snapshot filters, and learned "target → control" names per site. Text typed into fields is logged as a length only; options chosen in drop-downs are logged as chosen. Rows older than 30 days are removed when the hub starts and every six hours after. The folder and its files are readable by your user only. Delete the file to clear everything. |
 | Sends | Results go back to the Claude Code session over stdio. The bridge makes no network requests of its own unless semantic targeting is on. |
 
 ## Claude
