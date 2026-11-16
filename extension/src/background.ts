@@ -7,34 +7,54 @@
 // be suspended when idle, so nothing here relies on state surviving a restart
 // except the pairing key (storage) — the link is simply re-established.
 import { ext, isFirefox } from "./ext";
+import { ARM_MINUTES, DEFAULT_SETTINGS, KEY_RE, genKey, hostOf, isArmed, refusal, siteAllowed, type Settings } from "./policy";
 
-const BRIDGE_URL = "ws://127.0.0.1:8787";
+// 8787 unless the build was made with BRIDGE_PORT set (scripts/build.ts), which
+// also writes the same port into the manifest's connect-src.
+declare const BRIDGE_PORT: string;
+const BRIDGE_URL = `ws://127.0.0.1:${BRIDGE_PORT}`;
 let ws: WebSocket | null = null;
 
 function log(...a: unknown[]) {
   console.log("[browsteer]", ...a);
 }
 
-// Observable connection state on the toolbar icon (no devtools needed).
-function setBadge(state: "on" | "off" | "boot") {
+// Toolbar badge: is the bridge there, and may Claude work right now?
+//   ✓ green  bridge connected and access allowed      × grey  no bridge
+//   ▪ grey   bridge connected, browser locked
+let linked: "on" | "off" | "boot" = "boot";
+function paintBadge() {
   try {
-    ext.action.setBadgeText({ text: state === "on" ? "✓" : state === "off" ? "×" : "…" });
-    ext.action.setBadgeBackgroundColor({ color: state === "on" ? "#0b8f63" : "#56667a" });
+    const open = linked === "on" && isArmed(settings);
+    ext.action.setBadgeText({ text: linked === "boot" ? "…" : linked === "off" ? "×" : open ? "✓" : "▪" });
+    ext.action.setBadgeBackgroundColor({ color: open ? "#0b8f63" : "#56667a" });
   } catch {}
+}
+function setBadge(state: "on" | "off" | "boot") { linked = state; paintBadge(); }
+
+// ── Settings: what the person allowed in the popup ───────────────────────────
+// Kept in storage and mirrored here so the request-log listener (which must be
+// synchronous) can consult them. Only the popup and setup page write them; the
+// bridge has no message that changes any of it.
+let settings: Settings = { ...DEFAULT_SETTINGS };
+const settingsReady: Promise<void> = ext.storage.local.get("settings").then((r: any) => {
+  settings = { ...DEFAULT_SETTINGS, ...(r.settings ?? {}) };
+  paintBadge();
+});
+async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
+  await settingsReady;
+  settings = { ...settings, ...patch };
+  await ext.storage.local.set({ settings });
+  paintBadge();
+  return settings;
 }
 setBadge("boot");
 
 // ── Pairing key: generated once, persisted, shown in the popup ────────────────
-function genKey(): string {
-  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"; // no look-alikes
-  const grp = (n: number) =>
-    Array.from({ length: n }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
-  return `bst-${grp(4)}-${grp(4)}`;
-}
-
 async function getKey(): Promise<string> {
   const { bridgeKey } = await ext.storage.local.get("bridgeKey");
-  if (typeof bridgeKey === "string" && bridgeKey) return bridgeKey;
+  // Keys from before 1.8 were shorter and not from a CSPRNG: replace them.
+  if (typeof bridgeKey === "string" && KEY_RE.test(bridgeKey)) return bridgeKey;
   const k = genKey();
   await ext.storage.local.set({ bridgeKey: k });
   return k;
@@ -48,31 +68,24 @@ async function regenerateKey(): Promise<string> {
 }
 
 // ── Request log ──────────────────────────────────────────────────────────────
-// Ring buffer of the XHR/fetch traffic pages make, so a caller can see exactly
-// which API call a UI action fired (URL, method, query, POST body) and replay
-// it with `fetch` — instead of asking the user to dig it out of DevTools.
-type ReqEntry = { id: string; tabId: number; ts: number; method: string; url: string; type: string; body?: string; status?: number; mime?: string };
+// Ring buffer of the requests pages make, so a caller can see which API call a
+// UI action fired and read the same data directly. Method, address, status and
+// content type only: request bodies are never captured (they carry passwords
+// and form contents). Nothing is recorded while the browser is locked, or for
+// sites the person has not allowed.
+type ReqEntry = { id: string; tabId: number; ts: number; method: string; url: string; type: string; status?: number; mime?: string };
 const REQ_MAX = 300;
 const reqLog: ReqEntry[] = [];
 const reqById = new Map<string, ReqEntry>();
-function decodeBody(details: any): string | undefined {
-  const rb = details.requestBody;
-  if (!rb) return undefined;
-  if (rb.formData) return JSON.stringify(rb.formData).slice(0, 4000);
-  const raw = rb.raw?.[0]?.bytes;
-  if (!raw) return undefined;
-  try { return new TextDecoder().decode(new Uint8Array(raw)).slice(0, 4000); } catch { return `<${raw.byteLength} bytes>`; }
-}
 try {
   ext.webRequest.onBeforeRequest.addListener(
     (d: any) => {
-      if (d.tabId < 0) return;
-      const e: ReqEntry = { id: d.requestId, tabId: d.tabId, ts: d.timeStamp, method: d.method, url: d.url, type: d.type, body: decodeBody(d) };
+      if (d.tabId < 0 || !isArmed(settings) || !siteAllowed(settings, hostOf(d.url))) return;
+      const e: ReqEntry = { id: d.requestId, tabId: d.tabId, ts: d.timeStamp, method: d.method, url: d.url, type: d.type };
       reqLog.push(e); reqById.set(e.id, e);
       while (reqLog.length > REQ_MAX) { const old = reqLog.shift(); if (old) reqById.delete(old.id); }
     },
     { urls: ["<all_urls>"], types: ["xmlhttprequest", "main_frame", "sub_frame"] },
-    ["requestBody"],
   );
   ext.webRequest.onCompleted.addListener(
     (d: any) => { const e = reqById.get(d.requestId); if (e) { e.status = d.statusCode; e.mime = (d.responseHeaders ?? []).find((h: any) => h.name.toLowerCase() === "content-type")?.value; } },
@@ -145,11 +158,16 @@ function connect() {
       return;
     }
     try {
+      await settingsReady;
+      const gate = (host: string | null) => { const no = refusal(settings, req.op, req.params, host); if (no) throw new Error(no); };
       // browser-level ops (no content script needed)
       if (req.op === "tabs") {
+        gate(null);
+        // Only tabs on allowed sites are listed; the rest are counted, not named.
         const tabs = await ext.tabs.query({});
-        const list = tabs.map((t) => ({ tabId: t.id, title: t.title, url: t.url, active: t.active }));
-        ws?.send(JSON.stringify({ id: req.id, ok: true, result: { tabs: list } }));
+        const mine = tabs.filter((t) => siteAllowed(settings, hostOf(t.url)));
+        const list = mine.map((t) => ({ tabId: t.id, title: t.title, url: t.url, active: t.active }));
+        ws?.send(JSON.stringify({ id: req.id, ok: true, result: { tabs: list, hidden: tabs.length - mine.length } }));
         return;
       }
       // fetch: GET a URL from the extension context — sends the user's cookies,
@@ -157,8 +175,9 @@ function connect() {
       // can't reach (JSON viewer, pdf.js, TCC-protected cookie jar) come back as
       // raw bytes. Base64 keeps binary intact over the JSON websocket.
       if (req.op === "requests") {
+        gate(null);
         const p = req.params ?? {};
-        let list = reqLog.filter((e) => e.type === "xmlhttprequest" || p.all);
+        let list = reqLog.filter((e) => (e.type === "xmlhttprequest" || p.all) && siteAllowed(settings, hostOf(e.url)));
         if (p.tabId != null) list = list.filter((e) => e.tabId === p.tabId);
         if (p.filter) { const re = new RegExp(String(p.filter), "i"); list = list.filter((e) => re.test(e.url)); }
         if (p.since) list = list.filter((e) => e.ts >= p.since);
@@ -169,6 +188,7 @@ function connect() {
       }
       if (req.op === "fetch" && req.params?.fromPage) req.op = "pageFetch"; // run in the tab, as the page
       if (req.op === "fetch") {
+        gate(hostOf(req.params?.url));
         const method = String(req.params.method ?? "GET").toUpperCase();
         const res = await fetch(String(req.params.url), {
           method,
@@ -187,11 +207,17 @@ function connect() {
         return;
       }
       const tabId = await targetTabId(req.params);
+      // Where the tab is now decides whether it may be touched at all…
+      let tabUrl = ""; try { tabUrl = (await ext.tabs.get(tabId)).url ?? ""; } catch {}
       if (req.op === "navigate") {
+        // …except for navigate, where the destination is what matters.
+        gate(hostOf(req.params?.url));
         await ext.tabs.update(tabId, { url: req.params.url });
         ws?.send(JSON.stringify({ id: req.id, ok: true, result: { url: req.params.url, tabId } }));
         return;
       }
+      gate(hostOf(tabUrl));
+      if (req.op === "pageFetch") gate(hostOf(req.params?.url));
       let resp: any;
       try {
         resp = await ext.tabs.sendMessage(tabId, { op: req.op, params: req.params });
@@ -241,23 +267,51 @@ ext.runtime.onInstalled.addListener((d) => {
 });
 
 // ── Popup channel ─────────────────────────────────────────────────────────────
-ext.runtime.onMessage.addListener((msg: any, _sender: unknown, send: (r: unknown) => void) => {
-  if (msg?.type === "getStatus") {
-    getKey().then((key) => send({ key, connected: ws?.readyState === WebSocket.OPEN }));
-    return true; // async response
-  }
-  if (msg?.type === "regenerate") {
-    regenerateKey().then((key) => send({ key }));
-    return true;
-  }
-  if (msg?.type === "startPick") {
-    activeTabId()
-      .then((id) => ext.tabs.sendMessage(id, { op: "pick", params: {} }))
-      .catch(() => {});
-    send({ ok: true });
-    return true;
+// The only place settings change. Messages are accepted from this extension's
+// own pages only — never from a content script, which shares a process with the
+// page it runs in.
+async function status() {
+  await settingsReady;
+  let tab: any = null;
+  try { tab = await ext.tabs.get(await activeTabId()); } catch {}
+  const host = hostOf(tab?.url);
+  return {
+    key: await getKey(),
+    connected: ws?.readyState === WebSocket.OPEN,
+    settings,
+    armed: isArmed(settings),
+    site: host ? { host, allowed: siteAllowed(settings, host), blocked: settings.block.some((e) => host === e || host.endsWith(`.${e}`)) } : null,
+  };
+}
+const without = (list: string[], host: string) => list.filter((e) => e !== host);
+
+ext.runtime.onMessage.addListener((msg: any, sender: any, send: (r: unknown) => void) => {
+  if (!msg || typeof msg.type !== "string") return false;
+  const fromOwnPage = sender?.id === ext.runtime.id && !sender?.tab || String(sender?.url ?? "").startsWith(ext.runtime.getURL(""));
+  if (!fromOwnPage) return false;
+  if ("host" in msg) { msg.host = hostOf(`https://${String(msg.host)}`); if (!msg.host) return false; }
+  const reply = (p: Promise<unknown>) => { p.then(() => status()).then(send, () => send(null)); return true; };
+  switch (msg.type) {
+    case "getStatus": return reply(Promise.resolve());
+    case "regenerate": return reply(regenerateKey());
+    case "arm": return reply(saveSettings({ armedUntil: Date.now() + ARM_MINUTES * 60_000 }));
+    case "disarm": return reply(saveSettings({ armedUntil: 0 }));
+    case "setReadOnly": return reply(saveSettings({ readOnly: msg.value === true }));
+    case "setSiteMode": return reply(saveSettings({ siteMode: msg.value === "block" ? "block" : "allow" }));
+    case "allowSite": return reply(saveSettings({ allow: [...without(settings.allow, msg.host), msg.host], block: without(settings.block, msg.host) }));
+    case "blockSite": return reply(saveSettings({ block: [...without(settings.block, msg.host), msg.host], allow: without(settings.allow, msg.host) }));
+    case "forgetSite": return reply(saveSettings({ allow: without(settings.allow, msg.host), block: without(settings.block, msg.host) }));
+    case "unlockSite":
+      if (ws?.readyState === WebSocket.OPEN) ws.send('{"type":"unlock"}');
+      return reply(Promise.resolve());
+    case "startPick":
+      activeTabId().then((id) => ext.tabs.sendMessage(id, { op: "pick", params: {} })).catch(() => {});
+      return reply(Promise.resolve());
   }
   return false;
 });
+
+// The hour is up: repaint the badge without waiting for the next request.
+ext.alarms.onAlarm.addListener((a) => { if (a.name === "keepalive") paintBadge(); });
 
 ensureConnected();
