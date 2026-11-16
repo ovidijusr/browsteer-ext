@@ -196,3 +196,25 @@ describe("browser_links", () => {
     expect(r.text).toContain("Links: 1 of 137");
   });
 });
+
+describe("who may connect", () => {
+  const probe = (origin?: string) =>
+    fetch(`http://127.0.0.1:${PORT}`, { headers: origin ? { Origin: origin } : {} }).then((r) => r.status);
+
+  test("a web page's origin is refused", async () => {
+    expect(await probe("https://evil.example")).toBe(403);
+    expect(await probe("http://localhost:3000")).toBe(403);
+  });
+
+  test("the extension and origin-less local clients are let in", async () => {
+    expect(await probe("moz-extension://0b3c2d1e-aaaa-bbbb-cccc-000000000000")).toBe(200);
+    expect(await probe("chrome-extension://abcdefghijklmnopabcdefghijklmnop")).toBe(200);
+    expect(await probe()).toBe(200);
+  });
+
+  test("keep-alive pings from the extension are ignored, not answered", async () => {
+    ext.send(JSON.stringify({ type: "ping" }));
+    canned.links = { url: "https://a.example/", tabId: 55, total: 0, scoped: false, prefix: "", suffix: "", links: [] };
+    expect((await ask("links", {})).ok).toBe(true);
+  });
+});

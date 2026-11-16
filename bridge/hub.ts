@@ -15,6 +15,11 @@ import { THRESHOLDS, MEMO, findTarget, findMany, guardClick, needsGuard, warm, f
 import type { ServerWebSocket } from "bun";
 
 const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
+
+/** Who may open a socket to the hub: extension pages/workers, or a local client that sends no Origin. */
+function originAllowed(origin: string | null): boolean {
+  return !origin || /^(moz|chrome)-extension:\/\//.test(origin);
+}
 const CALL_TIMEOUT_MS = 15_000;
 
 // Per-controller (per Claude session) state — pairings/pins don't leak across sessions.
@@ -563,10 +568,20 @@ if (process.argv.includes("--stop")) {
   try {
     Bun.serve<SockData>({
       port: WS_PORT,
-      fetch(req, server) { if (server.upgrade(req, { data: { role: null, key: null, ctl: null } })) return; return new Response("browsteer hub", { status: 200 }); },
+      // Loopback only: nothing on the network can reach the hub.
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        // A web page can open ws://127.0.0.1 too (WebSockets skip the same-origin
+        // policy), and browsers always send its Origin. Only the extension and
+        // local non-browser clients (MCP shim, cli.ts — no Origin) may connect.
+        if (!originAllowed(req.headers.get("origin"))) return new Response("forbidden", { status: 403 });
+        if (server.upgrade(req, { data: { role: null, key: null, ctl: null } })) return;
+        return new Response("browsteer hub", { status: 200 });
+      },
       websocket: {
         message(ws, raw) {
           let msg: any; try { msg = JSON.parse(String(raw)); } catch { return; }
+          if (msg.type === "ping") return; // extension keep-alive (holds Chrome's service worker open)
           if (msg.type === "shutdown") { console.error("[hub] shutdown requested"); process.exit(0); }
           if (msg.type === "register" && typeof msg.key === "string") { ws.data.role = "extension"; ws.data.key = msg.key; browsers.set(msg.key, ws); console.error(`[hub] browser registered: ${msg.key}`); return; }
           if (msg.type === "hello" && msg.role === "control") { ws.data.role = "control"; ws.data.ctl = newController(); console.error("[hub] controller connected"); return; }
