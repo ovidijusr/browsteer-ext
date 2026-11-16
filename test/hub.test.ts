@@ -5,12 +5,17 @@
 // The fake extension answers ops with canned results, including the tabId that
 // background.ts now reports, which is what auto-pin and drift detection key off.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const PORT = 8791 + Math.floor(Math.random() * 60);
-const KEY = "bst-test-hub";
+const KEY = "bst-test-hub1-0001";
+const EXT_ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+const wsUrl = () => `ws://127.0.0.1:${PORT}`;
+/** The extension always connects with its Origin; local programs send none. */
+const asExtension = (origin = EXT_ORIGIN) => new WebSocket(wsUrl(), { headers: { Origin: origin } } as any);
+const token = () => readFileSync(join(DB_DIR, "token"), "utf8").trim();
 const ROOT = new URL("..", import.meta.url).pathname;
 const DB_DIR = mkdtempSync(join(tmpdir(), "browsteer-test-"));
 
@@ -57,7 +62,7 @@ beforeAll(async () => {
     } catch { await Bun.sleep(100); }
   }
 
-  ext = new WebSocket(`ws://127.0.0.1:${PORT}`);
+  ext = asExtension();
   await waitOpen(ext);
   ext.onmessage = (ev) => {
     const req = JSON.parse(String(ev.data));
@@ -74,7 +79,7 @@ beforeAll(async () => {
     pending.get(m.id)?.(m);
     pending.delete(m.id);
   };
-  ctl.send(JSON.stringify({ type: "hello", role: "control" }));
+  ctl.send(JSON.stringify({ type: "hello", role: "control", token: token() }));
   await Bun.sleep(150);
 
   expect((await ask("pair", { key: KEY })).text).toContain("Paired");
@@ -251,5 +256,137 @@ describe("semantic targeting is off by default", () => {
     const r = await ask("find", { target: "the Delete account button", act: "click" });
     expect(seenOps.some((o) => o.op === "click")).toBe(false);
     expect(r.text).toMatch(/irreversible|browser_click/i);
+  });
+});
+
+// Open a socket, send one message, report what the hub said back (or that it hung up).
+async function knock(sock: WebSocket, first: object, then?: object): Promise<any> {
+  await waitOpen(sock);
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve({ silent: true }), 400);
+    sock.onmessage = (ev) => { clearTimeout(t); resolve(JSON.parse(String(ev.data))); };
+    sock.onclose = () => { clearTimeout(t); resolve({ closed: true }); };
+    sock.send(JSON.stringify(first));
+    if (then) setTimeout(() => { try { sock.send(JSON.stringify(then)); } catch {} }, 60);
+  });
+}
+
+describe("authentication", () => {
+  test("a controller without the token is turned away", async () => {
+    const r = await knock(new WebSocket(wsUrl()), { type: "hello", role: "control" });
+    expect(r.type).toBe("denied");
+    const wrong = await knock(new WebSocket(wsUrl()), { type: "hello", role: "control", token: "0".repeat(64) });
+    expect(wrong.type).toBe("denied");
+  });
+
+  test("shutdown needs the token too", async () => {
+    const r = await knock(new WebSocket(wsUrl()), { type: "shutdown" });
+    expect(r.type).toBe("denied");
+    expect((await ask("list_filters", {})).ok).toBe(true); // still running
+  });
+
+  test("an extension cannot act as a controller, even with the token", async () => {
+    const r = await knock(asExtension(), { type: "hello", role: "control", token: token() });
+    expect(r.type).toBe("denied");
+  });
+
+  test("a local program cannot pose as a browser", async () => {
+    const r = await knock(new WebSocket(wsUrl()), { type: "register", key: "bst-fake-fake-fake" });
+    expect(r.type).toBe("denied");
+  });
+
+  test("a second, different extension is refused once the hub is bound to the first", async () => {
+    const r = await knock(asExtension("chrome-extension://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), { type: "register", key: "bst-rogu-rogu-rogu" });
+    expect(r.type).toBe("denied");
+    expect(r.reason).toContain("bound to another extension");
+  });
+
+  test("the bound extension is written to config.json", () => {
+    expect(JSON.parse(readFileSync(join(DB_DIR, "config.json"), "utf8")).extensions).toEqual([EXT_ORIGIN]);
+  });
+});
+
+describe("pairing is required", () => {
+  test("an authenticated controller that has not paired gets no browser, and no list of keys", async () => {
+    const c = new WebSocket(wsUrl());
+    await waitOpen(c);
+    c.send(JSON.stringify({ type: "hello", role: "control", token: token() }));
+    await Bun.sleep(80);
+    const snap: any = await new Promise((res) => { c.onmessage = (ev) => res(JSON.parse(String(ev.data))); c.send(JSON.stringify({ id: "x1", op: "snapshot", params: {} })); });
+    expect(snap.ok).toBe(false);
+    expect(snap.text).toContain("Not paired");
+    const pair: any = await new Promise((res) => { c.onmessage = (ev) => res(JSON.parse(String(ev.data))); c.send(JSON.stringify({ id: "x2", op: "pair", params: { key: "bst-nope-nope-nope" } })); });
+    expect(pair.ok).toBe(false);
+    expect(pair.text).not.toContain(KEY);
+    c.close();
+  });
+});
+
+describe("site lock", () => {
+  const on = (url: string) => ({ ...snapResult(url, 42) });
+
+  test("a read on another site is refused and its content withheld", async () => {
+    canned.snapshot = on("https://a.example/one");
+    expect((await ask("snapshot", {})).ok).toBe(true);
+    canned.snapshot = { ...on("https://mail.other.test/inbox"), tree: 'region\n  "SECRET INBOX TEXT"' };
+    const r = await ask("snapshot", {});
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("locked to a.example");
+    expect(r.text).not.toContain("SECRET INBOX TEXT");
+  });
+
+  test("navigating to another site is refused before it happens", async () => {
+    seenOps.length = 0;
+    const r = await ask("navigate", { url: "https://mail.other.test/compose" });
+    expect(r.ok).toBe(false);
+    expect(seenOps.some((o) => o.op === "navigate")).toBe(false);
+  });
+
+  test("the same site, including subdomains, keeps working", async () => {
+    canned.snapshot = on("https://app.a.example/two");
+    expect((await ask("snapshot", {})).ok).toBe(true);
+  });
+
+  test("the person can lift the lock from the popup", async () => {
+    ext.send(JSON.stringify({ type: "unlock" }));
+    await Bun.sleep(60);
+    canned.snapshot = on("https://mail.other.test/inbox");
+    expect((await ask("snapshot", {})).ok).toBe(true);
+    // …and the session now belongs to the new site.
+    canned.snapshot = on("https://a.example/one");
+    expect((await ask("snapshot", {})).ok).toBe(false);
+    ext.send(JSON.stringify({ type: "unlock" }));
+    await Bun.sleep(60);
+    expect((await ask("snapshot", {})).ok).toBe(true);
+  });
+});
+
+describe("browser_fetch limits", () => {
+  const body = { status: 200, contentType: "application/json", finalUrl: "https://a.example/api", size: 2, bodyBase64: btoa("{}") };
+
+  test("reads on the session's site are allowed", async () => {
+    canned.fetch = body;
+    expect((await ask("fetch", { url: "https://a.example/api" })).ok).toBe(true);
+  });
+
+  test("other sites are refused without a request being made", async () => {
+    seenOps.length = 0;
+    const r = await ask("fetch", { url: "https://internal.other.test/admin" });
+    expect(r.ok).toBe(false);
+    expect(seenOps.some((o) => o.op === "fetch")).toBe(false);
+  });
+
+  test("anything but GET/HEAD is refused", async () => {
+    seenOps.length = 0;
+    const r = await ask("fetch", { url: "https://a.example/api", method: "POST", body: "{}" });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("only reads");
+    expect(seenOps.some((o) => o.op === "fetch")).toBe(false);
+  });
+
+  test("saveTo cannot leave the download folder", async () => {
+    const r = await ask("fetch", { url: "https://a.example/api", saveTo: "~/.ssh/authorized_keys" });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("must be inside");
   });
 });

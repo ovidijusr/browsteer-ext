@@ -1,3 +1,4 @@
+import { readToken } from "./security";
 // Tiny control client for the running hub — call any op from a shell without MCP.
 //   bun run bridge/cli.ts <op> '<json params>' [--key bst-xxxx-yyyy]
 //   bun run bridge/cli.ts fetch '{"url":"https://…/forList?size=500","saveTo":"~/Downloads/forList.json"}' --key bst-dn5x-4ptm
@@ -17,10 +18,10 @@ function call(o: string, p: any): Promise<any> {
   const id = `${o}-${++seq}`;
   return new Promise((res) => { waits.set(id, res); ws.send(JSON.stringify({ id, op: o, params: p })); });
 }
-ws.onmessage = (ev) => { const m = JSON.parse(String(ev.data)); waits.get(m.id)?.(m); waits.delete(m.id); };
+ws.onmessage = (ev) => { const m = JSON.parse(String(ev.data)); if (m.type === "denied") { console.error(m.reason); process.exit(1); } waits.get(m.id)?.(m); waits.delete(m.id); };
 ws.onerror = () => { console.error("hub not reachable on", PORT); process.exit(1); };
 ws.onopen = async () => {
-  ws.send(JSON.stringify({ type: "hello", role: "control" }));
+  ws.send(JSON.stringify({ type: "hello", role: "control", token: readToken() }));
   if (key) { const r = await call("pair", { key }); if (!r.ok) { console.error(r.text); process.exit(1); } }
   const r = await call(op, params);
   console.log(r.text);

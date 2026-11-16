@@ -11,6 +11,7 @@
 import { TypeSafeClient, choice, noul } from "@typesafe-ai/sdk";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { loadConfig } from "./security";
 
 // ── Thresholds (tune against ~/.browsteer/browsteer.db actions.detail) ───────
 export const THRESHOLDS = {
@@ -103,8 +104,7 @@ export const JEV_OFF = 'Semantic targeting is off, so no page content is sent to
 export function jevEnabled(): boolean {
   const env = process.env.BROWSTEER_JEV;
   if (env != null) return env === "1" || env === "true";
-  const file = `${process.env.BROWSTEER_DB_DIR || `${homedir()}/.browsteer`}/config.json`;
-  try { return JSON.parse(readFileSync(file, "utf8")).jev === true; } catch { return false; }
+  return loadConfig().jev;
 }
 
 export const MAX_STATE_CHARS = 60_000; // ≈15k tokens; Jev's state budget is 32k tokens
