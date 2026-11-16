@@ -187,6 +187,8 @@ wrong document. `browser_pin` with no `tabId` opts out for the session.
 | `extension/src/background.ts` | socket to the hub, key registration, relays ops to the tab (event page in Firefox, service worker in Chrome) |
 | `extension/src/policy.ts` | access rules: key generation, arming, site lists, read-only, the gate every request passes |
 | `extension/src/risk.ts` | which control names count as a commitment (shared with the hub) |
+| `extension/src/guard.ts` | the check before a click or key press activates a control |
+| `extension/src/site.ts` | what counts as one site (shared with the hub) |
 | `extension/src/content.ts` | actions (click/fill/read/press), element picker, message plumbing |
 | `extension/src/snapshot.ts` | snapshot core — pure DOM-in/string-out, unit-tested under happy-dom |
 | `extension/src/fallback.ts` | hit-test scan, coordinate clicks, keyboard-style typing |

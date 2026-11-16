@@ -128,6 +128,43 @@ async function unreachableTab(tabId: number, cause: any): Promise<string> {
   return `The page in this tab (${url || "unknown"}) has not loaded Browsteer yet — it was open before the extension was installed or updated, or is still loading. Reload the tab (browser_navigate to its URL) and try again.`;
 }
 
+// ── Redirects, one checked hop at a time ─────────────────────────────────────
+// Letting fetch follow redirects would send the user's cookies, and whatever is
+// in the address, wherever the site points: an open redirect on an allowed site
+// reaches every other site. So each request stops at a redirect; the webRequest
+// observer reads where it points; that address goes through the same checks as
+// the first one (allowed, not blocked, same site as the session) and only then
+// is requested. A hop that fails a check is never sent.
+const MAX_HOPS = 5;
+const noHash = (u: string) => u.split("#")[0];
+async function followSafely<T>(start: string, check: (url: string) => void, run: (url: string) => Promise<T>): Promise<T> {
+  let url = start;
+  for (let hop = 0; hop <= MAX_HOPS; hop++) {
+    if (hop) {
+      try { check(url); }
+      catch (e: any) { throw new Error(`The address redirects to ${url}, which was not requested: ${String(e?.message ?? e)}`); }
+    }
+    let next: string | null = null;
+    const seen = (d: any) => {
+      if (noHash(d.url) !== noHash(url) || d.statusCode < 300 || d.statusCode >= 400) return;
+      const loc = (d.responseHeaders ?? []).find((h: any) => h.name.toLowerCase() === "location")?.value;
+      if (loc) try { next = new URL(loc, d.url).href; } catch {}
+    };
+    ext.webRequest.onHeadersReceived.addListener(seen, { urls: ["<all_urls>"] }, ["responseHeaders"]);
+    try {
+      return await run(url);
+    } catch (e: any) {
+      // The observer's event can arrive a moment after the request is rejected.
+      for (let i = 0; i < 10 && !next; i++) await new Promise((r) => setTimeout(r, 30));
+      if (!next) throw new Error(`The request to ${url} failed (${String(e?.message ?? e)}).`);
+      url = next;
+    } finally {
+      ext.webRequest.onHeadersReceived.removeListener(seen);
+    }
+  }
+  throw new Error(`Gave up after ${MAX_HOPS} redirects, at ${url}.`);
+}
+
 // ── WebSocket link ────────────────────────────────────────────────────────────
 // Retry quickly at first (the bridge usually starts seconds after the browser),
 // then back off so an absent bridge costs one quiet attempt every 15 s.
@@ -199,18 +236,16 @@ function connect() {
         gate(hostOf(req.params?.url));
         sameSession(req.params?.url, "that address");
         const method = String(req.params.method ?? "GET").toUpperCase();
-        const res = await fetch(String(req.params.url), {
+        const one = (url: string, redirect: RequestRedirect) => fetch(url, {
           method,
           credentials: "include",
           headers: req.params.headers ?? {},
           body: method === "GET" || method === "HEAD" ? undefined : req.params.body,
-          // A redirect could carry the user's cookies, or data in the address, to a
-          // site that was never allowed. The request stops at the first hop instead.
-          redirect: req.params.followRedirects === true ? "follow" : "error",
-        }).catch((e) => {
-          throw new Error(req.params.followRedirects === true ? String(e?.message ?? e)
-            : `The request failed or was redirected (${String(e?.message ?? e)}). browser_fetch does not follow redirects, so that nothing is sent to a site the user did not allow. Use the final address directly, or read it from the page.`);
+          redirect,
         });
+        const res = req.params.followRedirects === true
+          ? await one(String(req.params.url), "follow")
+          : await followSafely(String(req.params.url), (u) => { gate(hostOf(u)); sameSession(u, "that address"); }, (u) => one(u, "error"));
         const bytes = new Uint8Array(await res.arrayBuffer());
         let bin = "";
         for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000) as unknown as number[]);
@@ -241,7 +276,12 @@ function connect() {
       req.params = { ...(req.params ?? {}), expectHost: hostOf(tabUrl) };
       let resp: any;
       try {
-        resp = await ext.tabs.sendMessage(tabId, { op: req.op, params: req.params });
+        const relay = (params: any) => ext.tabs.sendMessage(tabId, { op: req.op, params });
+        resp = req.op === "pageFetch" && req.params.followRedirects !== true
+          // Same hop-by-hop rule when the request is made by the page itself.
+          ? await followSafely(String(req.params.url), (u) => { gate(hostOf(u)); sameSession(u, "that address"); },
+              async (u) => { const r: any = await relay({ ...req.params, url: u }); if (!r?.ok) throw new Error(r?.error ?? "request failed"); return r; })
+          : await relay(req.params);
       } catch (e: any) {
         throw new Error(await unreachableTab(tabId, e));
       }

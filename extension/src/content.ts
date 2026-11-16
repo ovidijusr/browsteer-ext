@@ -11,7 +11,7 @@ import {
   snapshot, collectLinks, formReport, getRef, clean, isVisible,
   absoluteHref, accessibleName, roleOf, type Filter,
 } from "./snapshot";
-import { needsGuard } from "./risk";
+import { guardClick, guardPress } from "./guard";
 import {
   scan, clickAt, deepElementAt, realClick, typeInto, editableIn, setDialogPolicy, drainDialogs, installDialogHooks, touchDialogs,
 } from "./fallback";
@@ -70,32 +70,6 @@ try {
 } catch {}
 function pulse() {
   return { url: location.href, mutations, ready: document.readyState };
-}
-
-// browser_click and browser_press are the ways to activate something without a
-// second opinion, so controls that sound like a commitment need the caller to
-// state that the user agreed (confirm: true). The words are in ./risk.ts. A real
-// control with no name at all is treated the same way: an icon-only trash button
-// says nothing about what it does.
-const CONTROL_SEL = "a[href], button, input[type=submit], input[type=button], input[type=image], input[type=reset], [role=button], [role=link], [role=menuitem], [role=tab]";
-/** closest() that also climbs out of shadow roots. */
-function closestControl(el: Element): Element | null {
-  for (let cur: Element | null = el; cur; ) {
-    const hit = cur.closest(CONTROL_SEL);
-    if (hit) return hit;
-    const root = cur.getRootNode();
-    cur = root instanceof ShadowRoot ? root.host : null;
-  }
-  return null;
-}
-function guardClick(el: Element | null, confirm: boolean, how = "browser_click({ ref, confirm: true })"): void {
-  if (confirm || !el) return;
-  const control = closestControl(el);
-  const subject = control ?? el;
-  const name = accessibleName(subject) || clean(subject.textContent).slice(0, 60);
-  if (control ? !needsGuard({ role: roleOf(control), name }) : !(name && needsGuard({ role: "link", name }))) return;
-  const label = name ? `“${name}”` : "An unnamed button";
-  throw new Error(`${label} ${name ? "sounds like" : "could be"} an action that cannot be undone, so it was not activated. Ask the user; if they agree, repeat with ${how}.`);
 }
 
 function doClick(ref: number, confirm = false) {
@@ -243,14 +217,7 @@ const KEYS: Record<string, string> = {
 function doPress(key: string, ref?: number, confirm = false) {
   const el = ((ref != null ? resolve(ref) : document.activeElement) as HTMLElement) ?? document.body;
   // Enter and Space activate things: the focused control, or the form the field is in.
-  if (key === "Enter" || key === " " || key === "Space") {
-    const how = "browser_press({ key, ref, confirm: true })";
-    if (closestControl(el)) guardClick(el, confirm, how);
-    else if (key === "Enter" && el instanceof HTMLInputElement && el.form) {
-      const submit = el.form.querySelector("button:not([type=button]):not([type=reset]), input[type=submit], input[type=image]");
-      if (submit) guardClick(submit, confirm, how);
-    }
-  }
+  guardPress(el, key, confirm);
   el.focus?.();
   const code = key.length === 1 ? `Key${key.toUpperCase()}` : (KEYS[key] ?? key);
   const keyCode =

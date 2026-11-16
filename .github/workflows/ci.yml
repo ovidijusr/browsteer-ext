@@ -36,7 +36,7 @@ jobs:
       - name: Install dependencies exactly as locked
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the extension
+      - name: Typecheck the extension, the bridge and the tests
         run: bun run typecheck
 
       # Hub rules (authentication, pairing, site lock, fetch limits), the

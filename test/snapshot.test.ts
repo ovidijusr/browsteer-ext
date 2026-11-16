@@ -434,6 +434,6 @@ describe("passwords stay in the page", () => {
     expect(r.tree).toContain("a@b.example");
     expect(r.tree).not.toContain("hunter2secret");
     expect(r.tree).toContain("13 chars, hidden");
-    expect(formReport(doc, {}).tree ?? JSON.stringify(formReport(doc, {}))).not.toContain("hunter2secret");
+    expect(formReport(doc, {}).text).not.toContain("hunter2secret");
   });
 });

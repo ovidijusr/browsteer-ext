@@ -34,7 +34,7 @@ These are enforced in the bridge:
 | Limit | Default | Effect |
 |---|---|---|
 | One site per session | on | A session stays on the site of the first page it touched. The bridge names that site with every request and the extension refuses to read, click, type or navigate in a tab on any other site, before anything happens. Lifted once by *Let Claude switch site* in the popup. |
-| `browser_fetch` | GET/HEAD, same site, no redirects | No state-changing requests, no requests to other sites, and redirects are not followed, so a link on the allowed site cannot carry cookies or data elsewhere. `saveTo` only writes inside one download folder. |
+| `browser_fetch` | GET/HEAD, same site, checked redirects | No state-changing requests and no requests to other sites. A redirect is followed one hop at a time, and each hop must pass the same checks as the first address (allowed, not blocked, same site) before it is requested, so an open redirect on the allowed site cannot carry cookies or data elsewhere. At most 5 hops. `saveTo` only writes inside one download folder. |
 | Log | 30 days, owner-only | Typed text is logged as a length; request bodies are never captured. |
 
 ## Prompt injection
