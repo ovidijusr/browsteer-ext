@@ -1,6 +1,6 @@
 {
   "name": "browsteer",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,14 +19,14 @@
     "sign:firefox": "bun run build:firefox && bunx web-ext sign --source-dir dist/firefox --artifacts-dir artifacts --channel unlisted"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@typesafe-ai/sdk": "^0.6.0",
-    "zod": "^3.25.76"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@typesafe-ai/sdk": "0.6.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14",
-    "@types/firefox-webext-browser": "^143.0.0",
-    "happy-dom": "^20.11.1",
-    "typescript": "^7.0.2"
+    "@types/bun": "1.3.14",
+    "@types/firefox-webext-browser": "143.0.0",
+    "happy-dom": "20.11.1",
+    "typescript": "7.0.2"
   }
 }

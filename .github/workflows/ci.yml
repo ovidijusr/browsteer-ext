@@ -1,0 +1,68 @@
+# Runs on every push and pull request: the same checks as a release, in the
+# same order, so nothing reaches main that could not be shipped.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only token, and no secrets are used anywhere in this workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Test, typecheck, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+
+      # Fails if bun.lock and package.json disagree, so a dependency cannot
+      # change without the lockfile change being reviewed.
+      - name: Install dependencies exactly as locked
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck the extension
+        run: bun run typecheck
+
+      # Hub rules (authentication, pairing, site lock, fetch limits), the
+      # extension's access policy, and the snapshot core. No browser needed.
+      - name: Run tests
+        run: bun test
+
+      - name: Build both extensions
+        run: bun run build
+
+      # Everything the extension may do is declared in its manifest. If a
+      # permission is added or the CSP loosened, this step fails until
+      # docs/PERMISSIONS.md is updated to explain it.
+      - name: Check permissions against the documented set
+        run: bun run scripts/check-manifest.ts
+
+      - name: Lint the Firefox build
+        run: bunx web-ext@8 lint --source-dir dist/firefox --self-hosted
+
+      - name: Package
+        run: bun run package
+
+      - name: Keep the packages from this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: browsteer-${{ github.sha }}
+          path: artifacts/*.zip
+          retention-days: 14
+          if-no-files-found: error
