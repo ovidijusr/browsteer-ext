@@ -6,7 +6,7 @@
 // the parts that genuinely need the page: actions, the element picker, and the
 // extension message plumbing.
 //
-// `browser` is the global provided by @types/firefox-webext-browser.
+import { ext } from "./ext";
 import {
   snapshot, collectLinks, formReport, getRef, clean, isVisible,
   absoluteHref, type Filter,
@@ -125,9 +125,11 @@ function doRead(ref: number) {
   return { url: location.href, text };
 }
 
-// fetch AS THE PAGE: Firefox's `content.fetch` carries the page's Origin/Referer, so
-// same-origin APIs that reject extension-origin requests (Booking's /dml/graphql → 403)
-// answer normally. The background `fetch` op stays the default for cross-origin reads.
+// fetch AS THE PAGE: the request carries the page's Origin/Referer, so same-origin
+// APIs that reject extension-origin requests (a site's own /graphql → 403) answer
+// normally. Firefox needs `content.fetch` for that; in Chrome a content script's
+// plain `fetch` already goes out as the page. The background `fetch` op stays the
+// default for cross-origin reads.
 async function pageFetch(p: any) {
   const w: any = globalThis as any;
   const method = String(p.method ?? "GET").toUpperCase();
@@ -230,10 +232,10 @@ function startPicker(): Promise<any> {
     if (pickerActive) return resolve({ cancelled: true, error: "picker already active" });
     pickerActive = true;
     const box = document.createElement("div");
-    box.style.cssText = "position:fixed;z-index:2147483647;border:2px solid #2563eb;background:rgba(37,99,235,.12);pointer-events:none;border-radius:2px";
+    box.style.cssText = "position:fixed;z-index:2147483647;border:2px solid #2447e0;background:rgba(36,71,224,.12);pointer-events:none;border-radius:2px";
     const tip = document.createElement("div");
-    tip.style.cssText = "position:fixed;z-index:2147483647;top:0;left:0;background:#111;color:#fff;font:12px/1.4 ui-monospace,monospace;padding:4px 7px;border-radius:5px;pointer-events:none;max-width:92vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
-    tip.textContent = "Browsteer: click an element to select · Esc to cancel";
+    tip.style.cssText = "position:fixed;z-index:2147483647;top:0;left:0;background:#0e1b2c;color:#fff;font:12px/1.4 ui-monospace,monospace;padding:4px 7px;border-radius:5px;pointer-events:none;max-width:92vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+    tip.textContent = "Browsteer: click an element to pick it, Esc to cancel";
     document.body.append(box, tip);
     let current: Element | null = null;
 
@@ -255,8 +257,8 @@ function startPicker(): Promise<any> {
       box.remove(); tip.remove();
       pickerActive = false;
       if (result && result.selector) {
-        try { browser.storage.local.set({ lastPick: result }); } catch {}
-        toast(`Selected: ${result.selector} (${result.matchCount}×)`);
+        try { ext.storage.local.set({ lastPick: result }); } catch {}
+        toast(`Picked ${result.selector} (${result.matchCount} on the page)`);
       }
       resolve(result);
     };
@@ -282,7 +284,7 @@ function startPicker(): Promise<any> {
 function toast(msg: string) {
   const t = document.createElement("div");
   t.textContent = msg;
-  t.style.cssText = "position:fixed;z-index:2147483647;bottom:16px;left:50%;transform:translateX(-50%);background:#16a34a;color:#fff;font:13px/1.4 system-ui;padding:8px 14px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3)";
+  t.style.cssText = "position:fixed;z-index:2147483647;bottom:16px;left:50%;transform:translateX(-50%);background:#0e1b2c;color:#fff;font:13px/1.4 system-ui;padding:8px 14px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3)";
   document.body.append(t);
   setTimeout(() => t.remove(), 2500);
 }
@@ -333,7 +335,7 @@ function handleOp(op: string, params: any): unknown {
 // Re-exported so the bundle keeps the symbol even if a future op needs it.
 void isVisible;
 
-browser.runtime.onMessage.addListener(
+ext.runtime.onMessage.addListener(
   (msg: any, _sender: unknown, sendResponse: (r: unknown) => void) => {
     if (!msg || typeof msg.op !== "string") return false; // not for us (e.g. popup msgs)
     // handleOp may return a value or a Promise (pick waits for a click) — await both.
