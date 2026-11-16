@@ -1,12 +1,27 @@
 // The pairing key and bridge lamp, shared by the popup and the setup page.
 import { ext } from "./ext";
 
-export type Status = { key: string; connected: boolean };
+import type { Settings } from "./policy";
 
-export async function getStatus(): Promise<Status | null> {
-  try { return (await ext.runtime.sendMessage({ type: "getStatus" })) as Status; }
-  catch { return null; } // background is restarting; the next poll gets it
+export type Status = {
+  key: string;
+  connected: boolean;
+  settings: Settings;
+  armed: boolean;
+  /** The site in the active tab, if it is a web page. */
+  site: { host: string; allowed: boolean; blocked: boolean } | null;
+};
+
+/** Send a command to the background; every command answers with the new status. */
+export async function send(type: string, extra: Record<string, unknown> = {}): Promise<Status | null> {
+  try { return (await ext.runtime.sendMessage({ type, ...extra })) as Status; }
+  catch { return null; }
 }
+
+/** "14:32" in the person's locale. */
+export const clock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+export const getStatus = () => send("getStatus");
 
 /** Render `bst-ab12-cd34` as three groups so it can be read aloud and checked at a glance. */
 export function renderKey(el: HTMLElement, key: string): void {

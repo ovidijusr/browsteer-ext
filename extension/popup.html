@@ -12,21 +12,40 @@
     <span class="ver" id="ver" title="Installed version"></span>
   </header>
 
-  <button class="key" id="key" type="button" title="Copy the /browse command"><span>bst</span><span>····</span><span>····</span></button>
+  <button class="key" id="key" type="button" title="Copy the /browse command"><span>bst</span><span>····</span><span>····</span><span>····</span></button>
 
   <p class="link" id="link" data-state="boot" role="status">
     <span class="lamp" aria-hidden="true"></span>
     <span id="linkText">Checking the bridge…</span>
   </p>
 
+  <section class="access" id="access" data-armed="false" aria-label="Access">
+    <p id="accessText">Claude cannot use this browser.</p>
+    <button class="btn primary" id="arm" type="button">Allow Claude for 1 hour</button>
+    <button class="btn" id="disarm" type="button" hidden>Stop now</button>
+  </section>
+
+  <section class="site" id="site" hidden aria-label="This site">
+    <p><strong id="siteHost"></strong> <span id="siteState"></span></p>
+    <div class="row">
+      <button class="btn" id="siteAllow" type="button"></button>
+      <button class="btn quiet" id="siteBlock" type="button">Never here</button>
+    </div>
+  </section>
+
+  <div class="options">
+    <label><input type="checkbox" id="readOnly" /> Read only: Claude can look but not click or type</label>
+    <button class="btn quiet" id="unlock" type="button" title="A session stays on the site it started on. This lets the current session continue on another site.">Let Claude switch site</button>
+  </div>
+
   <div class="actions">
-    <button class="btn primary" id="copy" type="button">Copy /browse command</button>
-    <button class="btn" id="regen" type="button" title="Replace this browser's key. The old key stops working.">New key</button>
+    <button class="btn" id="copy" type="button">Copy /browse command</button>
+    <button class="btn" id="regen" type="button" title="Replace this browser's key. The old key stops working at once.">New key</button>
   </div>
 
   <footer>
     <button class="btn quiet" id="pick" type="button" title="Click any element on the page to get its CSS selector">Pick an element</button>
-    <a href="welcome.html" target="_blank" rel="noopener">Setup and privacy</a>
+    <a href="welcome.html" target="_blank" rel="noopener">Sites, setup and privacy</a>
   </footer>
   <p class="picked" id="picked" hidden></p>
 
