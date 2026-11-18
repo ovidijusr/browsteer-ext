@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Browsteer",
   "version": "0.0.0",
-  "description": "Lets Claude Code on this computer read and operate the pages you have open, through a local bridge you start yourself.",
+  "description": "Lets Claude Code on this computer read pages, click, and fill forms in this browser, only on sites you allow.",
   "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
   "permissions": ["tabs", "storage", "alarms", "webRequest"],
   "host_permissions": ["<all_urls>"],

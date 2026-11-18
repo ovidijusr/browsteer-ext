@@ -1,8 +1,14 @@
 # Browsteer
 
-Lets a local **Claude Code** session read and operate the pages open in your
-own **Chrome or Firefox** — click, fill, read — through a compact accessibility
-snapshot instead of raw HTML.
+Browsteer lets Claude Code read and operate the pages open in your own Chrome
+or Firefox, where you are already signed in. It is a browser extension and a
+local MCP server. Claude sees each page as a compact accessibility snapshot
+instead of raw HTML, then clicks buttons, fills forms, and reads values by
+reference.
+
+Use it for work that needs your logged-in browser: filling a form on a site
+with no API, comparing listings across tabs, or reading a dashboard behind
+single sign-on.
 
 ```
 browser extension        hub (one local daemon)          per-session MCP shims
@@ -11,9 +17,10 @@ browser extension        hub (one local daemon)          per-session MCP shims
   fill, read)              ~/.browsteer/browsteer.db
 ```
 
-One **hub** daemon owns the browser connection and persists across sessions. A
-thin **MCP shim** is what Claude starts per session; it forwards `browser_*`
-calls to the hub and starts the hub on first use.
+One hub process (`bridge/hub.ts`) owns the browser connection and keeps running
+across sessions. Claude Code starts a small MCP shim (`bridge/mcp.ts`) for each
+session. The shim forwards `browser_*` calls to the hub and starts the hub if
+it is not running.
 
 Access is closed by default. Claude can use the browser only while you have
 allowed it for an hour, only on sites you have allowed, and one site per
