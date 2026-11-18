@@ -87,6 +87,16 @@ acceptable.
 reinstalling the extension in Firefox (its internal address changes), or when
 adding a second browser, add the origin the hub prints when it refuses it.
 
+## Releases and updates
+
+The Firefox build checks
+`https://github.com/ovidijusr/browsteer-ext/releases/latest/download/updates.json`
+for new versions, over https only, and installs one only if Mozilla signed it and its
+sha256 matches the one in `updates.json`. Releases are built and signed by
+`.github/workflows/release.yml` from a pushed tag. The Mozilla signing key is a
+secret of a GitHub environment that only the signing step can read, and pull requests
+never run that workflow. Details: [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Reporting a problem
 
 Open a private security advisory on the repository, or contact the owner

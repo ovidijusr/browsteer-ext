@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { spawn as nodeSpawn } from "node:child_process";
 import { readToken } from "./security";
+import { VERSION, cmpVersion } from "./version";
 
 const HUB_URL = `ws://127.0.0.1:${process.env.BRIDGE_PORT ?? 8787}`;
 const HUB_PATH = fileURLToPath(new URL("./hub.ts", import.meta.url));
@@ -19,28 +20,86 @@ let ws: WebSocket | null = null;
 let ensuring: Promise<void> | null = null;
 const pending = new Map<string, { resolve: (m: any) => void; timer: ReturnType<typeof setTimeout> }>();
 let seq = 0;
+// Set when the hub runs newer code than this session loaded: every reply then says to restart the session.
+let staleNote = "";
+// A newer shim restarts an older hub once. Once only, so a checkout that went backwards cannot loop.
+let restartedHub = false;
 
-function openControl(): Promise<void> {
+class Denied extends Error {}
+const failAll = (text: string) => { for (const [id, w] of pending) { clearTimeout(w.timer); pending.delete(id); w.resolve({ id, ok: false, text }); } };
+
+/** Connect and say hello. Resolves with the hub's version, or null for a hub too old to report one. */
+function openControl(): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const sock = new WebSocket(HUB_URL);
+    let settled = false;
+    const done = (v: string | null) => { if (settled) return; settled = true; clearTimeout(to); ws = sock; resolve(v); };
     const to = setTimeout(() => { try { sock.close(); } catch {} reject(new Error("connect timeout")); }, 2000);
-    sock.onopen = () => { clearTimeout(to); sock.send(JSON.stringify({ type: "hello", role: "control", token: readToken() })); ws = sock; resolve(); };
-    sock.onmessage = (ev) => { let m: any; try { m = JSON.parse(String(ev.data)); } catch { return; } if (m.type === "denied") { console.error(`[browsteer] hub refused this session: ${m.reason}`); for (const [id, w] of pending) { clearTimeout(w.timer); pending.delete(id); w.resolve({ id, ok: false, text: `The Browsteer hub refused this session: ${m.reason} Restart the hub (bun run hub:stop) and try again.` }); } return; } const p = pending.get(m.id); if (!p) return; clearTimeout(p.timer); pending.delete(m.id); p.resolve(m); };
-    sock.onclose = () => { if (ws === sock) ws = null; };
+    sock.onopen = () => {
+      sock.send(JSON.stringify({ type: "hello", role: "control", token: readToken(), version: VERSION }));
+      clearTimeout(to);
+      // Hubs from before 2.0.0 never answer the hello; give a current one a moment to.
+      setTimeout(() => done(null), 1500);
+    };
+    sock.onmessage = (ev) => {
+      let m: any; try { m = JSON.parse(String(ev.data)); } catch { return; }
+      if (m.type === "welcome") return done(typeof m.version === "string" ? m.version : null);
+      if (m.type === "denied") {
+        const text = `The Browsteer hub refused this session: ${m.reason} Restart the hub (bun run hub:stop) and try again.`;
+        console.error(`[browsteer] ${text}`);
+        if (!settled) { settled = true; clearTimeout(to); reject(new Denied(text)); } else failAll(text);
+        return;
+      }
+      const p = pending.get(m.id); if (!p) return; clearTimeout(p.timer); pending.delete(m.id); p.resolve(m);
+    };
+    sock.onclose = () => {
+      if (ws !== sock) return;
+      ws = null;
+      // A hub restart (e.g. after an update) must not leave calls waiting for the 130 s timeout.
+      failAll("The Browsteer hub restarted while this call was running. Run it again.");
+    };
     sock.onerror = () => { clearTimeout(to); reject(new Error("connect error")); };
   });
+}
+
+function spawnHub() {
+  // Detached so it survives this session; the hub singleton-guards itself.
+  try { const c = nodeSpawn(process.execPath, ["run", HUB_PATH], { detached: true, stdio: "ignore" }); c.unref(); } catch {}
+}
+
+async function waitForHub(): Promise<string | null> {
+  const end = Date.now() + 6000;
+  while (Date.now() < end) { try { return await openControl(); } catch (e) { if (e instanceof Denied) throw e; await Bun.sleep(200); } }
+  throw new Error("could not reach or start the browsteer hub");
+}
+
+/** The hub keeps running across sessions, so after `bun run update` it can be older or newer than this shim. */
+async function checkVersion(hubVersion: string | null): Promise<void> {
+  const d = hubVersion ? cmpVersion(hubVersion, VERSION) : -1;
+  if (d > 0) {
+    staleNote = `\n⚠ This Claude Code session loaded Browsteer v${VERSION}, but the hub runs v${hubVersion}. Start a new Claude Code session to get the current browser tools.`;
+    return;
+  }
+  staleNote = "";
+  if (d === 0 || restartedHub) return;
+  // The hub runs older code than is on disk now: replace it with the current one.
+  restartedHub = true;
+  console.error(`[browsteer] hub is v${hubVersion ?? "<2.0.0"}, this session is v${VERSION}: restarting the hub`);
+  try { ws?.send(JSON.stringify({ type: "shutdown", token: readToken() })); } catch {}
+  ws = null;
+  await Bun.sleep(400);
+  spawnHub();
+  const v = await waitForHub();
+  if (v !== VERSION) console.error(`[browsteer] hub restarted but reports v${v ?? "?"}`);
 }
 
 async function ensureHub(): Promise<void> {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   if (ensuring) return ensuring;
   ensuring = (async () => {
-    try { await openControl(); return; } catch {}
-    // Spawn the hub detached so it survives this session; singleton-guards itself.
-    try { const c = nodeSpawn(process.execPath, ["run", HUB_PATH], { detached: true, stdio: "ignore" }); c.unref(); } catch {}
-    const end = Date.now() + 5000;
-    while (Date.now() < end) { try { await openControl(); return; } catch { await Bun.sleep(200); } }
-    throw new Error("could not reach or start the browsteer hub");
+    let v: string | null;
+    try { v = await openControl(); } catch (e) { if (e instanceof Denied) throw e; spawnHub(); v = await waitForHub(); }
+    await checkVersion(v);
   })().finally(() => { ensuring = null; });
   return ensuring;
 }
@@ -49,14 +108,15 @@ async function forward(op: string, args: Record<string, unknown>): Promise<{ ok:
   try { await ensureHub(); } catch (e: any) { return { ok: false, text: e?.message ?? "hub unavailable" }; }
   if (!ws) return { ok: false, text: "browsteer hub unavailable" };
   const id = `${op}-${++seq}`;
-  return new Promise((resolve) => {
+  const r = await new Promise<{ ok: boolean; text: string }>((resolve) => {
     const timer = setTimeout(() => { pending.delete(id); resolve({ ok: false, text: `hub timeout on '${op}'` }); }, 130_000);
     pending.set(id, { resolve: (m: any) => resolve({ ok: m.ok, text: m.text }), timer });
     ws!.send(JSON.stringify({ id, op, params: args }));
   });
+  return staleNote ? { ok: r.ok, text: r.text + staleNote } : r;
 }
 
-const mcp = new McpServer({ name: "browsteer", version: "1.0.0" });
+const mcp = new McpServer({ name: "browsteer", version: VERSION });
 function tool(name: string, config: any) {
   const op = name.replace(/^browser_/, "");
   mcp.registerTool(name, config, async (args: any) => {

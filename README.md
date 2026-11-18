@@ -42,9 +42,9 @@ mkdir -p ~/.claude/skills && cp -R skill/browse ~/.claude/skills/browse
 `chrome://extensions`, turn on *Developer mode*, choose *Load unpacked* and
 select `dist/chrome`.
 
-**Firefox** (128 or newer): for a permanent install, sign the build with
-`bun run sign:firefox` (needs AMO API credentials in `WEB_EXT_API_KEY` /
-`WEB_EXT_API_SECRET`) and open the resulting `.xpi`. For a session-only install,
+**Firefox** (128 or newer): open `browsteer-firefox-<version>.xpi` from the
+[latest release](https://github.com/ovidijusr/browsteer-ext/releases/latest). It is
+signed by Mozilla and updates itself. For a session-only install of your own build,
 open `about:debugging#/runtime/this-firefox`, choose *Load Temporary Add-on…*
 and select `dist/firefox/manifest.json`.
 
@@ -54,6 +54,18 @@ green once the bridge is found.
 > The hub listens on `127.0.0.1:8787`. To use another port, set `BRIDGE_PORT`
 > both when building the extension (`BRIDGE_PORT=8799 bun run build`) and in the
 > environment the hub and MCP shim run in.
+
+## Updating
+
+```sh
+bun run update      # pull, install, rebuild dist/, restart the hub
+```
+
+The signed Firefox extension updates itself from GitHub releases (about:addons →
+⚙ → *Check for Updates* to do it now). Chrome and temporary installs need
+**Reload** on the extensions page after `bun run update`. The popup and
+`browser_pair` say when the extension and the bridge are on different versions.
+How releases are signed and published: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Use it
 
@@ -195,7 +207,10 @@ wrong document. `browser_pin` with no `tabId` opts out for the session.
 | `extension/src/dialogs.ts`, `dialogs-main.ts` | alert/confirm/prompt handling; the second file is Chrome's page-world half |
 | `extension/src/popup.ts`, `welcome.ts`, `keyview.ts` | popup and setup page |
 | `scripts/build.ts`, `package.ts`, `dev.ts` | build, package, dev loop |
+| `scripts/update.ts`, `updates-json.ts` | `bun run update`; the `updates.json` Firefox reads for new versions |
+| `bridge/version.ts` | the bridge version and the extension/bridge mismatch notes |
 | `scripts/check-manifest.ts` | CI check: the built manifests ask for exactly what is documented |
+| `.github/workflows/release.yml` | on a `v*` tag: test, build, sign with Mozilla, publish the release ([docs/RELEASING.md](docs/RELEASING.md)) |
 | `.github/workflows/ci.yml` | typecheck, tests, build, manifest check, Firefox lint, package |
 | `skill/browse/SKILL.md` | the `/browse` slash command for Claude Code |
 

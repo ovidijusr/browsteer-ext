@@ -22,6 +22,11 @@ const targets: Target[] = wanted.length ? wanted : ["firefox", "chrome"];
 // The bridge port is baked in: the extension can only ever talk to this one address.
 const port = String(Number(process.env.BRIDGE_PORT ?? 8787));
 const version: string = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+// Where Firefox looks for new versions of a self-distributed (unlisted) build. The release
+// workflow publishes updates.json with every GitHub release, so "latest" always names the
+// newest signed .xpi. Set BROWSTEER_UPDATE_URL="" to build without automatic updates (forks).
+const updateUrl = process.env.BROWSTEER_UPDATE_URL ?? "https://github.com/ovidijusr/browsteer-ext/releases/latest/download/updates.json";
+if (updateUrl && !updateUrl.startsWith("https://")) throw new Error("BROWSTEER_UPDATE_URL must be https://");
 
 function manifest(target: Target) {
   const base = JSON.parse(readFileSync(join(SRC, "manifest.base.json"), "utf8"));
@@ -36,6 +41,7 @@ function manifest(target: Target) {
           id: "browsteer-cc@ovi.lt",
           strict_min_version: "128.0",
           data_collection_permissions: { required: ["none"] },
+          ...(updateUrl ? { update_url: updateUrl } : {}),
         },
       },
     };

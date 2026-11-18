@@ -126,6 +126,9 @@ code, kbd { font-family: var(--mono); font-size: 0.93em; }
 .popup header .ver { margin-left: auto; color: var(--muted); font: 400 11px var(--mono); }
 .popup .key { font-size: 23px; }
 .popup .link { margin-top: 12px; font-size: 13px; }
+/* The extension and the bridge disagree on version. Ink, not red: nothing is broken yet. */
+.popup .warn { margin: 8px 0 0 19px; color: var(--ink); font-size: 12px; }
+.popup .warn[hidden] { display: none; }
 
 /* Access: the one decision this popup exists for. Locked is the resting state. */
 .access, .site {

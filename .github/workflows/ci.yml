@@ -54,7 +54,7 @@ jobs:
         run: bun run scripts/check-manifest.ts
 
       - name: Lint the Firefox build
-        run: bunx web-ext@8.10.0 lint --source-dir dist/firefox --self-hosted
+        run: node_modules/.bin/web-ext lint --source-dir dist/firefox --self-hosted
 
       - name: Package
         run: bun run package

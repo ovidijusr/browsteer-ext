@@ -16,6 +16,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { THRESHOLDS, MEMO, JEV_OFF, jevEnabled, findTarget, findMany, guardClick, needsGuard, warm, formatShortlist, pct, parseCandidates, memoMatch, lexicalMatch, candKey, type Ranked, type Candidate, type FindResult } from "./jev";
 import type { ServerWebSocket } from "bun";
+import { VERSION, extensionVersionNote } from "./version";
 
 const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
 
@@ -31,7 +32,7 @@ interface Controller {
   lastOpMayNavigate: boolean; // the previous op could legitimately change the URL
   site: string | null;      // the site this session started on; it stays there (see siteCheck)
 }
-type SockData = { role: "extension" | "control" | null; key: string | null; ctl: Controller | null; peer: Peer; origin: string | null };
+type SockData = { role: "extension" | "control" | null; key: string | null; ctl: Controller | null; peer: Peer; origin: string | null; extVersion: string | null };
 type Sock = ServerWebSocket<SockData>;
 
 const browsers = new Map<string, Sock>(); // key → extension socket
@@ -224,7 +225,9 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
           : `No browser with key '${p.key}', and none are connected. Open Chrome or Firefox with the extension.`);
       }
       ctl.activeKey = p.key;
-      return ok(`Paired with browser '${p.key}'.`);
+      const note = extensionVersionNote(browsers.get(p.key)!.data.extVersion);
+      return ok(`Paired with browser '${p.key}'.${note ? `
+${note}` : ""}`);
     }
     case "snapshot": {
       try {
@@ -638,7 +641,7 @@ if (process.argv.includes("--stop")) {
         const origin = req.headers.get("origin");
         const peer = classifyOrigin(origin);
         if (peer === "refused") return new Response("forbidden", { status: 403 });
-        if (server.upgrade(req, { data: { role: null, key: null, ctl: null, peer, origin } })) return;
+        if (server.upgrade(req, { data: { role: null, key: null, ctl: null, peer, origin, extVersion: null } })) return;
         return new Response("browsteer hub", { status: 200 });
       },
       websocket: {
@@ -650,7 +653,10 @@ if (process.argv.includes("--stop")) {
           if (msg.type === "shutdown" || (msg.type === "hello" && msg.role === "control")) {
             if (ws.data.peer !== "local" || !tokenMatches(TOKEN, msg.token)) return deny(`Not authorised. Controllers must send the token in ${join(DATA_DIR, "token")}.`);
             if (msg.type === "shutdown") { console.error("[hub] shutdown requested"); process.exit(0); }
-            ws.data.role = "control"; ws.data.ctl = newController(); controllers.add(ws.data.ctl); console.error("[hub] controller connected"); return;
+            ws.data.role = "control"; ws.data.ctl = newController(); controllers.add(ws.data.ctl); console.error(`[hub] controller connected (v${msg.version ?? "?"})`);
+            // The shim compares versions: a newer shim restarts an older hub, an older shim tells its session to restart.
+            try { ws.send(JSON.stringify({ type: "welcome", version: VERSION })); } catch {}
+            return;
           }
           // Browsers: extension origins only, and only the extension this hub knows.
           if (msg.type === "register" && typeof msg.key === "string") {
@@ -660,7 +666,11 @@ if (process.argv.includes("--stop")) {
             if (verdict === "first") { updateConfig({ extensions: [ws.data.origin] }); console.error(`[hub] bound to extension ${ws.data.origin} (saved in config.json)`); }
             if (!/^bst(-[a-z0-9]{4}){3}$/.test(msg.key)) return deny("Pairing key has the wrong format. Update the extension.");
             if (ws.data.key && browsers.get(ws.data.key) === ws) browsers.delete(ws.data.key); // New key: the old one stops working
-            ws.data.role = "extension"; ws.data.key = msg.key; browsers.set(msg.key, ws); console.error("[hub] browser registered"); return;
+            ws.data.role = "extension"; ws.data.key = msg.key; browsers.set(msg.key, ws);
+            ws.data.extVersion = typeof msg.version === "string" ? msg.version : null;
+            console.error(`[hub] browser registered (extension v${ws.data.extVersion ?? "?"})`);
+            try { ws.send(JSON.stringify({ type: "registered", hubVersion: VERSION })); } catch {} // the popup shows a version mismatch
+            return;
           }
           // The person chose "Let Claude switch site": sessions paired with this browser may start over on a new site.
           if (msg.type === "unlock" && ws.data.role === "extension") { for (const c of controllers) if (c.activeKey === ws.data.key) c.site = null; return; }
@@ -674,7 +684,7 @@ if (process.argv.includes("--stop")) {
       },
     });
     TOKEN = ensureToken();
-    console.error(`[hub] listening on ws://127.0.0.1:${WS_PORT}`);
+    console.error(`[hub] v${VERSION} listening on ws://127.0.0.1:${WS_PORT}`);
     console.error(`[hub] semantic targeting (Jev): ${jevEnabled() ? "on — page outlines go to api.typesafe.ai on find/pursue" : "off"}`);
     if (jevEnabled()) warm().then(() => console.error("[hub] jev connection warm")); // first find should not pay the TLS handshake
     // Idle connections go cold in well under a minute (first request after a pause:

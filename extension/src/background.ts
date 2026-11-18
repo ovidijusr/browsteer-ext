@@ -15,6 +15,9 @@ import { ARM_MINUTES, DEFAULT_SETTINGS, KEY_RE, genKey, hostOf, isArmed, refusal
 declare const BRIDGE_PORT: string;
 const BRIDGE_URL = `ws://127.0.0.1:${BRIDGE_PORT}`;
 let ws: WebSocket | null = null;
+// The bridge's version, as the hub reported it on registering (null for hubs before 2.0.0).
+let hubVersion: string | null = null;
+const MY_VERSION: string = ext.runtime.getManifest().version;
 
 function log(...a: unknown[]) {
   console.log("[browsteer]", ...a);
@@ -64,7 +67,7 @@ async function getKey(): Promise<string> {
 async function regenerateKey(): Promise<string> {
   const k = genKey();
   await ext.storage.local.set({ bridgeKey: k });
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "register", key: k }));
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "register", key: k, version: MY_VERSION }));
   return k;
 }
 
@@ -179,7 +182,8 @@ function connect() {
   ws.onopen = async () => {
     attempt = 0;
     const key = await getKey();
-    ws?.send(JSON.stringify({ type: "register", key }));
+    hubVersion = null;
+    ws?.send(JSON.stringify({ type: "register", key, version: MY_VERSION }));
     log("connected & registered as", key);
     setBadge("on");
     // Chrome suspends a service worker after 30 s without events, which would
@@ -195,6 +199,7 @@ function connect() {
     } catch {
       return;
     }
+    if ((req as any).type === "registered") { hubVersion = typeof (req as any).hubVersion === "string" ? (req as any).hubVersion : null; return; }
     try {
       await settingsReady;
       const gate = (host: string | null) => { const no = refusal(settings, req.op, req.params, host); if (no) throw new Error(no); };
@@ -339,6 +344,8 @@ async function status() {
   return {
     key: await getKey(),
     connected: ws?.readyState === WebSocket.OPEN,
+    version: MY_VERSION,
+    hubVersion,
     settings,
     armed: isArmed(settings),
     site: host ? { host, allowed: siteAllowed(settings, host), blocked: settings.block.some((e) => host === e || host.endsWith(`.${e}`)) } : null,

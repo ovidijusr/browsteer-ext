@@ -6,6 +6,9 @@ import type { Settings } from "./policy";
 export type Status = {
   key: string;
   connected: boolean;
+  /** This extension's version and the bridge's (null until the bridge reports it; bridges before 2.0.0 never do). */
+  version: string;
+  hubVersion: string | null;
   settings: Settings;
   armed: boolean;
   /** The site in the active tab, if it is a web page. */

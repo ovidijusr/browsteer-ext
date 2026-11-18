@@ -36,6 +36,20 @@ function render(s: Status | null) {
     $("siteBlock").hidden = s.site.blocked;
   }
   $<HTMLInputElement>("readOnly").checked = s.settings.readOnly;
+
+  // The extension and the bridge update separately; say so when they disagree.
+  const mismatch = s.connected && s.hubVersion !== null && s.hubVersion !== s.version;
+  $("verWarn").hidden = !mismatch;
+  if (mismatch) $("verWarn").textContent = newer(s.hubVersion!, s.version)
+    ? `The bridge is v${s.hubVersion}; this extension is v${s.version}. Firefox: about:addons → ⚙ → Check for Updates.`
+    : `This extension is v${s.version}; the bridge is v${s.hubVersion}. Run "bun run update" in the Browsteer folder.`;
+}
+
+/** True when dotted version a is newer than b. */
+function newer(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  return false;
 }
 
 const act = (type: string, extra: Record<string, unknown> = {}) => send(type, extra).then(render);

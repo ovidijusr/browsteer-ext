@@ -53,10 +53,11 @@ Everything else, including every other line of JavaScript, is identical.
 
 ## Release
 
-1. Bump `version` in `package.json`.
-2. `bun test && bun run typecheck && bun run lint:firefox`
-3. `bun run package`
-4. Firefox: `bun run sign:firefox` (AMO credentials in `WEB_EXT_API_KEY` /
-   `WEB_EXT_API_SECRET`) and attach the signed `.xpi` to the release.
-5. Chrome: upload `artifacts/browsteer-chrome-<version>.zip` to the Web Store,
-   or distribute the zip for *Load unpacked*.
+1. Bump `version` in `package.json` and commit.
+2. `git tag vX.Y.Z && git push origin main vX.Y.Z`
+3. `.github/workflows/release.yml` tests, builds, signs the Firefox build with
+   Mozilla (unlisted) and publishes a GitHub release with the signed `.xpi`,
+   `updates.json` and the Chrome zip. Installed Firefoxes update from it.
+
+The whole flow, the credentials it uses and the one-time setup:
+[docs/RELEASING.md](docs/RELEASING.md).

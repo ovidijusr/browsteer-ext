@@ -5,5 +5,8 @@ web-ext-artifacts/
 browsteer.db*
 .DS_Store
 .env
+.env.*
 .op.env
 *.pem
+*.xpi
+.amo-upload-uuid
