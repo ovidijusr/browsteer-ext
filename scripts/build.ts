@@ -22,10 +22,11 @@ const targets: Target[] = wanted.length ? wanted : ["firefox", "chrome"];
 // The bridge port is baked in: the extension can only ever talk to this one address.
 const port = String(Number(process.env.BRIDGE_PORT ?? 8787));
 const version: string = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
-// Where Firefox looks for new versions of a self-distributed (unlisted) build. The release
-// workflow publishes updates.json with every GitHub release, so "latest" always names the
-// newest signed .xpi. Set BROWSTEER_UPDATE_URL="" to build without automatic updates (forks).
-const updateUrl = process.env.BROWSTEER_UPDATE_URL ?? "https://github.com/ovidijusr/browsteer-ext/releases/latest/download/updates.json";
+// Releases are listed on addons.mozilla.org, and Firefox updates listed add-ons from AMO.
+// AMO rejects listed versions that carry update_url, so the build has none by default.
+// A self-distributed (unlisted) build can set BROWSTEER_UPDATE_URL to the https address of
+// its own updates.json (see scripts/updates-json.ts and docs/RELEASING.md).
+const updateUrl = process.env.BROWSTEER_UPDATE_URL ?? "";
 if (updateUrl && !updateUrl.startsWith("https://")) throw new Error("BROWSTEER_UPDATE_URL must be https://");
 
 function manifest(target: Target) {

@@ -1,9 +1,11 @@
 # Release: push a tag vX.Y.Z (matching "version" in package.json) and this
-# builds, tests, signs the Firefox extension with Mozilla (AMO, unlisted channel),
-# and publishes a GitHub release with:
-#   browsteer-firefox-X.Y.Z.xpi   signed; installed Firefoxes update to it by themselves
-#   updates.json                  what Firefox's update check reads (update_url points here)
+# builds and tests, submits the Firefox build to addons.mozilla.org (AMO, listed
+# channel) with the source archive Mozilla's reviewers need, and publishes a
+# GitHub release with:
 #   browsteer-chrome-X.Y.Z.zip    for "Load unpacked" or the Chrome Web Store
+#   browsteer-source-X.Y.Z.zip    the exact source submitted to AMO
+# Firefox users install and update from https://addons.mozilla.org/firefox/addon/browsteer/
+# once Mozilla has approved the version.
 # See docs/RELEASING.md for the whole flow and the one-time setup.
 #
 # Credentials: the AMO API key and secret are GitHub secrets of the "amo"
@@ -65,34 +67,37 @@ jobs:
         run: bun run scripts/check-manifest.ts
 
       - name: Lint the Firefox build
-        run: node_modules/.bin/web-ext lint --source-dir dist/firefox --self-hosted
+        run: node_modules/.bin/web-ext lint --source-dir dist/firefox
 
       - name: Package the Chrome build
         run: bun run package
 
-      # The only step that sees the AMO credentials. Unlisted = signed by Mozilla
-      # for self-distribution; it is not published on addons.mozilla.org.
-      - name: Sign the Firefox build with Mozilla (unlisted)
+      # Reviewers rebuild from this and compare (the extension code is minified).
+      # git archive takes tracked files at the tag only: no node_modules, no secrets.
+      - name: Archive the source for Mozilla's review
+        run: git archive --format=zip -o "artifacts/browsteer-source-$(jq -r .version package.json).zip" HEAD
+
+      # The only step that sees the AMO credentials. Listed = published on
+      # addons.mozilla.org after Mozilla's review; Firefox then updates installs
+      # from AMO. The version is submitted here and not waited for: review can
+      # take from minutes to days, and AMO publishes it by itself when approved.
+      - name: Submit the Firefox build to addons.mozilla.org (listed)
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
           WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-        run: node_modules/.bin/web-ext sign --source-dir dist/firefox --artifacts-dir signed --channel unlisted --approval-timeout 1800000
-
-      - name: Name the signed file and write updates.json
         run: |
-          v="$(jq -r .version package.json)"
-          xpi="$(ls signed/*.xpi | head -n1)"
-          mv "$xpi" "artifacts/browsteer-firefox-$v.xpi"
-          bun run scripts/updates-json.ts "artifacts/browsteer-firefox-$v.xpi"
+          node_modules/.bin/web-ext sign --source-dir dist/firefox --artifacts-dir signed --channel listed \
+            --amo-metadata .github/amo-metadata.json \
+            --upload-source-code "artifacts/browsteer-source-$(jq -r .version package.json).zip" \
+            --approval-timeout 0
 
       - name: Hand the files to the publish job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
           path: |
-            artifacts/browsteer-firefox-*.xpi
             artifacts/browsteer-chrome-*.zip
-            artifacts/updates.json
+            artifacts/browsteer-source-*.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -106,7 +111,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Fetch the signed files
+      - name: Fetch the release files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release
@@ -115,4 +120,6 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --title "Browsteer $GITHUB_REF_NAME" --generate-notes --latest
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --title "Browsteer $GITHUB_REF_NAME" --latest \
+            --notes "Firefox: install or update from https://addons.mozilla.org/firefox/addon/browsteer/ (this version appears there once Mozilla has reviewed it). Chrome, Edge and Brave: unzip browsteer-chrome-*.zip and choose Load unpacked. The bridge: git pull, or bun run update." --generate-notes

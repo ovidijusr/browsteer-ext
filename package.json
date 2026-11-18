@@ -1,6 +1,6 @@
 {
   "name": "browsteer",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -15,7 +15,7 @@
     "mcp": "bun run bridge/mcp.ts",
     "hub": "bun run bridge/hub.ts",
     "hub:stop": "bun run bridge/hub.ts --stop",
-    "lint:firefox": "bun run build:firefox && web-ext lint --source-dir dist/firefox --self-hosted",
+    "lint:firefox": "bun run build:firefox && web-ext lint --source-dir dist/firefox",
     "package": "bun run scripts/package.ts",
     "sign:firefox": "bun run build:firefox && web-ext sign --source-dir dist/firefox --artifacts-dir artifacts --channel unlisted",
     "updates-json": "bun run scripts/updates-json.ts",

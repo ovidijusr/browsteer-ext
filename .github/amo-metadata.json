@@ -1,0 +1,9 @@
+{
+  "categories": ["web-development"],
+  "homepage": { "en-US": "https://github.com/ovidijusr/browsteer-ext" },
+  "support_url": { "en-US": "https://github.com/ovidijusr/browsteer-ext/issues" },
+  "version": {
+    "license": "MIT",
+    "approval_notes": "The extension code is minified by Bun's bundler. The attached source archive is the tagged commit of https://github.com/ovidijusr/browsteer-ext.\n\nTo reproduce the build (Bun 1.3.9, any OS):\n  bun install --frozen-lockfile --ignore-scripts\n  bun run scripts/build.ts firefox\nThe output in dist/firefox is what was submitted. BUILD.md maps each source file to its output.\n\nThe extension talks only to a local bridge program at ws://127.0.0.1:8787 that the user runs themselves (bridge/ in the source). It collects no data. The access rules are in extension/src/policy.ts and SECURITY.md. To try it: run the bridge as described in README.md, click the toolbar button, choose \"Allow Claude for 1 hour\", allow a site, and pair Claude Code with the key shown."
+  }
+}

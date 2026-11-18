@@ -55,9 +55,10 @@ Everything else, including every other line of JavaScript, is identical.
 
 1. Bump `version` in `package.json` and commit.
 2. `git tag vX.Y.Z && git push origin main vX.Y.Z`
-3. `.github/workflows/release.yml` tests, builds, signs the Firefox build with
-   Mozilla (unlisted) and publishes a GitHub release with the signed `.xpi`,
-   `updates.json` and the Chrome zip. Installed Firefoxes update from it.
+3. `.github/workflows/release.yml` tests, builds, submits the Firefox build to
+   addons.mozilla.org (listed) with a source archive, and publishes a GitHub
+   release with the Chrome zip and the source archive. Firefox installs update
+   from AMO once Mozilla approves the version.
 
 The whole flow, the credentials it uses and the one-time setup:
 [docs/RELEASING.md](docs/RELEASING.md).

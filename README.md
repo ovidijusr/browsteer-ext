@@ -49,9 +49,9 @@ mkdir -p ~/.claude/skills && cp -R skill/browse ~/.claude/skills/browse
 `chrome://extensions`, turn on *Developer mode*, choose *Load unpacked* and
 select `dist/chrome`.
 
-**Firefox** (128 or newer): open `browsteer-firefox-<version>.xpi` from the
-[latest release](https://github.com/ovidijusr/browsteer-ext/releases/latest). It is
-signed by Mozilla and updates itself. For a session-only install of your own build,
+**Firefox** (128 or newer): install
+[Browsteer from addons.mozilla.org](https://addons.mozilla.org/firefox/addon/browsteer/).
+Firefox keeps it up to date. For a session-only install of your own build,
 open `about:debugging#/runtime/this-firefox`, choose *Load Temporary Add-on…*
 and select `dist/firefox/manifest.json`.
 
@@ -68,7 +68,7 @@ green once the bridge is found.
 bun run update      # pull, install, rebuild dist/, restart the hub
 ```
 
-The signed Firefox extension updates itself from GitHub releases (about:addons →
+Firefox updates the extension from addons.mozilla.org (about:addons →
 ⚙ → *Check for Updates* to do it now). Chrome and temporary installs need
 **Reload** on the extensions page after `bun run update`. The popup and
 `browser_pair` say when the extension and the bridge are on different versions.
@@ -217,7 +217,7 @@ wrong document. `browser_pin` with no `tabId` opts out for the session.
 | `scripts/update.ts`, `updates-json.ts` | `bun run update`; the `updates.json` Firefox reads for new versions |
 | `bridge/version.ts` | the bridge version and the extension/bridge mismatch notes |
 | `scripts/check-manifest.ts` | CI check: the built manifests ask for exactly what is documented |
-| `.github/workflows/release.yml` | on a `v*` tag: test, build, sign with Mozilla, publish the release ([docs/RELEASING.md](docs/RELEASING.md)) |
+| `.github/workflows/release.yml` | on a `v*` tag: test, build, submit to addons.mozilla.org with the source, publish the GitHub release ([docs/RELEASING.md](docs/RELEASING.md)) |
 | `.github/workflows/ci.yml` | typecheck, tests, build, manifest check, Firefox lint, package |
 | `skill/browse/SKILL.md` | the `/browse` slash command for Claude Code |
 

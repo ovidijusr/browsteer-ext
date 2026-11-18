@@ -4,7 +4,7 @@ Browsteer has two halves that update separately:
 
 | Half | Lives in | How it updates |
 |---|---|---|
-| **Extension** (Firefox) | the browser, as a Mozilla-signed `.xpi` | by itself: Firefox checks `update_url` about once a day |
+| **Extension** (Firefox) | the browser, installed from addons.mozilla.org | by itself: Firefox checks AMO about once a day |
 | **Extension** (Chrome, or a temporary Firefox install) | `dist/chrome` / `dist/firefox`, loaded unpacked | `bun run update`, then **Reload** on the extensions page |
 | **Bridge** (hub + per-session MCP shim) | this checkout | `bun run update` |
 
@@ -14,14 +14,16 @@ new session.
 
 ## How a Firefox release reaches users
 
-Firefox only installs extensions that Mozilla has signed. Mozilla's add-on site (AMO)
+Firefox installs only extensions that Mozilla has signed. Mozilla's add-on site (AMO)
 offers two channels:
 
-- **Listed:** public on addons.mozilla.org; Mozilla reviews every version (can take days,
-  and minified code needs a source upload); Firefox updates from AMO.
-- **Unlisted** (what Browsteer uses): signed for self-distribution, not shown on
-  addons.mozilla.org; signing is automated and usually takes minutes; *we* host the file
-  and tell Firefox where to look for updates.
+- **Listed** (what Browsteer uses): public at
+  <https://addons.mozilla.org/firefox/addon/browsteer/>. Mozilla reviews each version.
+  Because the build is minified, each version is submitted with its source code.
+  Firefox updates listed add-ons from AMO.
+- **Unlisted:** signed for self-distribution and not shown on AMO. The publisher hosts
+  the file and an `updates.json`, and the manifest carries `update_url`. AMO rejects
+  `update_url` in listed versions, so the default build has none.
 
 The flow for one release:
 
@@ -30,36 +32,28 @@ bump "version" in package.json ─▶ commit ─▶ git tag vX.Y.Z ─▶ git pu
                                                                    │
             .github/workflows/release.yml (on the tag) ◀───────────┘
               1. test, typecheck, build, permission check, lint   (no credentials)
-              2. web-ext sign --channel unlisted                  (AMO credentials, this step only)
-                 └─ uploads dist/firefox to AMO ─▶ Mozilla signs ─▶ signed .xpi comes back
-              3. write updates.json (version, download link, sha256 of the .xpi)
-              4. GitHub release vX.Y.Z: the .xpi, updates.json, the Chrome zip
+              2. git archive the tagged source
+              3. web-ext sign --channel listed                    (AMO credentials, this step only)
+                 └─ uploads dist/firefox, the source archive, and .github/amo-metadata.json
+              4. GitHub release vX.Y.Z: the Chrome zip and the source archive
                                                                    │
-  Installed Firefoxes ── update_url ─▶ releases/latest/download/updates.json
-                       ── newer version? ─▶ download the .xpi, check its sha256, install
+  Mozilla reviews the version (minutes to days) ─▶ AMO publishes it ─▶ Firefox installs update
 ```
 
-The Firefox build's manifest carries
-`update_url: https://github.com/ovidijusr/browsteer-ext/releases/latest/download/updates.json`.
-`latest` always resolves to the newest release, so nothing has to be committed back to the
-repository after a release. Firefox checks about once a day;
-**about:addons → ⚙ → Check for Updates** checks now.
+The workflow does not wait for the review. The new version shows on AMO under
+**Manage Status & Versions** right away and goes public when Mozilla approves it.
+`.github/amo-metadata.json` holds the license, category, homepage, and the build notes
+for reviewers. The listing text (summary and description) is edited on AMO itself.
 
-Every version number can be signed once only. A failed run after AMO has accepted the
-upload means bumping to the next patch version.
+Each version number can be submitted once only. If a run fails after AMO accepted the
+upload, bump to the next patch version.
 
-### First install
+### A self-distributed build
 
-Download `browsteer-firefox-X.Y.Z.xpi` from the
-[latest release](https://github.com/ovidijusr/browsteer-ext/releases/latest) and open it in
-Firefox (or drag it onto a Firefox window). From then on it updates by itself.
-
-### Without the workflow
-
-`bun run sign:firefox` with `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET` in the environment signs
-from your machine (the `.xpi` lands in `artifacts/`). Then
-`bun run updates-json artifacts/<file>.xpi` and attach both files to a GitHub release named
-`vX.Y.Z`, with the `.xpi` renamed to `browsteer-firefox-X.Y.Z.xpi` first.
+To host your own signed build (a fork, for example): set `BROWSTEER_UPDATE_URL` to the
+https address of your `updates.json` when building, sign with
+`web-ext sign --channel unlisted`, run `bun run updates-json <signed .xpi>`, and publish
+both files.
 
 ## Credentials
 
@@ -90,7 +84,7 @@ Mozilla account, so:
    - **Deployment branches and tags:** *Selected* → add the tag rule `v*`.
    - **Required reviewers:** yourself (optional; each release then waits for one click).
    - **Environment secrets:** `AMO_JWT_ISSUER` = the JWT issuer, `AMO_JWT_SECRET` = the secret.
-3. Push a tag. The first signed release is the one to install by hand (see above).
+3. Push a tag.
 
 ## Chrome
 
