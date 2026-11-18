@@ -1,6 +1,7 @@
 # Release: push a tag vX.Y.Z (matching "version" in package.json) and this
 # builds and tests, submits the Firefox build to addons.mozilla.org (AMO, listed
-# channel) with the source archive Mozilla's reviewers need, and publishes a
+# channel) with the source archive Mozilla's reviewers need, submits the Chrome
+# build to the Chrome Web Store (once the store item exists), and publishes a
 # GitHub release with:
 #   browsteer-chrome-X.Y.Z.zip    for "Load unpacked" or the Chrome Web Store
 #   browsteer-source-X.Y.Z.zip    the exact source submitted to AMO
@@ -9,7 +10,9 @@
 # See docs/RELEASING.md for the whole flow and the one-time setup.
 #
 # Credentials: the AMO API key and secret are GitHub secrets of the "amo"
-# environment, so only jobs that name that environment can read them, and the
+# environment, and the Chrome Web Store OAuth client and refresh token are
+# secrets of the "chrome-web-store" environment, so only jobs that name that
+# environment can read them, and the
 # environment can require a person to approve each run. They are handed to the
 # one signing step only; nothing else in the run can see them. This workflow
 # runs on tag pushes only (never for pull requests, which is how forks would
@@ -101,6 +104,58 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Chrome Web Store: upload the same zip and submit it for review. Runs no
+  # project code and no dependencies, only curl and jq against Google's API
+  # (https://developer.chrome.com/docs/webstore/using-api). Skipped until the
+  # repository variables CWS_PUBLISHER_ID and CWS_ITEM_ID are set, which happens
+  # after the first version is uploaded by hand (docs/RELEASING.md).
+  chrome-web-store:
+    name: Submit to the Chrome Web Store
+    needs: build-and-sign
+    if: vars.CWS_ITEM_ID != '' && vars.CWS_PUBLISHER_ID != ''
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    environment: chrome-web-store
+    permissions: {}
+    steps:
+      - name: Fetch the release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+
+      # The only step that sees the Google credentials. Publishing sends the
+      # version to Google's review; the store publishes it when it passes.
+      - name: Upload and submit for review
+        env:
+          CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          PUBLISHER: ${{ vars.CWS_PUBLISHER_ID }}
+          ITEM: ${{ vars.CWS_ITEM_ID }}
+        run: |
+          set -euo pipefail
+          token=$(curl -sS --fail-with-body https://oauth2.googleapis.com/token             --data-urlencode "client_id=$CLIENT_ID" --data-urlencode "client_secret=$CLIENT_SECRET"             --data-urlencode "refresh_token=$REFRESH_TOKEN" -d grant_type=refresh_token | jq -r .access_token)
+          echo "::add-mask::$token"
+          api=https://chromewebstore.googleapis.com
+          item="publishers/$PUBLISHER/items/$ITEM"
+          zip=$(ls release/browsteer-chrome-*.zip)
+          echo "Uploading $zip"
+          up=$(curl -sS --fail-with-body -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/zip"             --data-binary "@$zip" "$api/upload/v2/$item:upload")
+          echo "$up" | jq .
+          state=$(echo "$up" | jq -r '.uploadState // "UNKNOWN"')
+          for i in $(seq 1 40); do
+            case "$state" in IN_PROGRESS|UPLOAD_IN_PROGRESS) ;; *) break ;; esac
+            sleep 15
+            st=$(curl -sS --fail-with-body -H "Authorization: Bearer $token" "$api/v2/$item:fetchStatus")
+            state=$(echo "$st" | jq -r '.lastAsyncUploadState // .uploadState // "UNKNOWN"')
+            echo "upload: $state"
+          done
+          if [ "$state" != "SUCCEEDED" ]; then echo "::error::Chrome Web Store upload ended as $state"; exit 1; fi
+          pub=$(curl -sS --fail-with-body -X POST -H "Authorization: Bearer $token" "$api/v2/$item:publish")
+          echo "$pub" | jq .
+          echo "::notice::Submitted to the Chrome Web Store for review."
+
   # Runs no project code and no dependencies: it only uploads the files above.
   # It is the only job whose token may write to the repository (to create the release).
   publish:
@@ -122,4 +177,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --title "Browsteer $GITHUB_REF_NAME" --latest \
-            --notes "Firefox: install or update from https://addons.mozilla.org/firefox/addon/browsteer/ (this version appears there once Mozilla has reviewed it). Chrome, Edge and Brave: unzip browsteer-chrome-*.zip and choose Load unpacked. The bridge: git pull, or bun run update." --generate-notes
+            --notes "Firefox: install or update from https://addons.mozilla.org/firefox/addon/browsteer/ (this version appears there once Mozilla has reviewed it). Chrome, Edge and Brave: the Chrome Web Store once Google has reviewed it, or unzip browsteer-chrome-*.zip and choose Load unpacked. The bridge: git pull, or bun run update." --generate-notes

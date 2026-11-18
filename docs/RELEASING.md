@@ -5,7 +5,8 @@ Browsteer has two halves that update separately:
 | Half | Lives in | How it updates |
 |---|---|---|
 | **Extension** (Firefox) | the browser, installed from addons.mozilla.org | by itself: Firefox checks AMO about once a day |
-| **Extension** (Chrome, or a temporary Firefox install) | `dist/chrome` / `dist/firefox`, loaded unpacked | `bun run update`, then **Reload** on the extensions page |
+| **Extension** (Chrome, Edge, Brave from the Chrome Web Store) | the browser | by itself: Chrome checks the store every few hours |
+| **Extension** (unpacked Chrome, or a temporary Firefox install) | `dist/chrome` / `dist/firefox`, loaded unpacked | `bun run update`, then **Reload** on the extensions page |
 | **Bridge** (hub + per-session MCP shim) | this checkout | `bun run update` |
 
 Both report their version to each other. The popup and `browser_pair` say when they
@@ -35,7 +36,9 @@ bump "version" in package.json ─▶ commit ─▶ git tag vX.Y.Z ─▶ git pu
               2. git archive the tagged source
               3. web-ext sign --channel listed                    (AMO credentials, this step only)
                  └─ uploads dist/firefox, the source archive, and .github/amo-metadata.json
-              4. GitHub release vX.Y.Z: the Chrome zip and the source archive
+              4. Chrome Web Store: upload the Chrome zip, submit for review
+                                                                  (Google credentials, this step only)
+              5. GitHub release vX.Y.Z: the Chrome zip and the source archive
                                                                    │
   Mozilla reviews the version (minutes to days) ─▶ AMO publishes it ─▶ Firefox installs update
 ```
@@ -57,9 +60,11 @@ both files.
 
 ## Credentials
 
-The only credential in the release process is the **AMO API key** (a JWT issuer, which looks
-like `user:12345:67`, and its secret). It can sign new versions of every add-on on the
-Mozilla account, so:
+The release process uses two sets of credentials, kept the same way: the **AMO API key**
+(below) and the **Chrome Web Store OAuth client** (see [Chrome](#chrome)).
+
+The **AMO API key** is a JWT issuer, which looks like `user:12345:67`, and its secret. It can
+sign new versions of every add-on on the Mozilla account, so:
 
 - It is stored as two secrets, `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`, of a GitHub
   **environment** named `amo`, not as repository-wide secrets. Only a job that names the
@@ -88,10 +93,67 @@ Mozilla account, so:
 
 ## Chrome
 
-Chrome only auto-updates extensions installed from the Chrome Web Store. Until Browsteer is
-there, a Chrome install is an unpacked folder: run `bun run update`, then press **Reload** on
-`chrome://extensions`. The release also attaches `browsteer-chrome-X.Y.Z.zip`, which is the
-file a Web Store submission takes.
+Chrome, Edge and Brave auto-update extensions installed from the Chrome Web Store. The
+release workflow's `chrome-web-store` job uploads `browsteer-chrome-X.Y.Z.zip` and submits
+it for review; Google publishes the version when the review passes (usually hours to a few
+days). Until the store item exists, the job is skipped and Chrome installs stay unpacked
+(`bun run update`, then **Reload**).
+
+The job talks to the [Chrome Web Store API v2](https://developer.chrome.com/docs/webstore/using-api)
+with `curl` and `jq` only: it exchanges a refresh token for an access token, uploads the zip,
+waits for processing, and calls `publish`.
+
+### Credentials
+
+An OAuth client (ID and secret) plus a refresh token for the Google account that owns the
+store item. Together they can publish any item of that account, so they are kept like the AMO
+key:
+
+- Secrets `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET` and `CWS_REFRESH_TOKEN` of a GitHub
+  environment named `chrome-web-store`. Only the upload step receives them, and the access
+  token it gets is masked in the log.
+- The publisher ID and the item ID are not secret. They are repository **variables**
+  `CWS_PUBLISHER_ID` and `CWS_ITEM_ID`; the job runs only when both are set.
+- If they leak: delete the OAuth client in Google Cloud (that also kills the refresh token),
+  create a new one, and update the secrets.
+
+### One-time setup (repository owner)
+
+1. **Developer account.** Register at
+   <https://chrome.google.com/webstore/devconsole> (a one-time registration fee) and turn on
+   2-step verification for the Google account; publishing requires it.
+2. **First version by hand.** The API cannot create items. In the dashboard choose
+   **New item**, upload `browsteer-chrome-X.Y.Z.zip` from a GitHub release (or
+   `bun run package`), and fill in:
+   - **Store listing:** text from [store-listing.md](store-listing.md#chrome-web-store),
+     the 128 px icon, at least one 1280×800 screenshot (`docs/store/`).
+   - **Privacy:** single purpose, the permission justifications and the data-use answers,
+     also in [store-listing.md](store-listing.md#chrome-web-store). Privacy policy URL:
+     `https://github.com/ovidijusr/browsteer-ext/blob/main/PRIVACY.md`.
+   - Submit for review. Note the **item ID** (32 letters, on the Package tab) and the
+     **publisher ID** (Account → Publisher settings).
+3. **OAuth client.** In <https://console.cloud.google.com>: create a project, enable the
+   **Chrome Web Store API**, set up the OAuth consent screen (External, add yourself as a test
+   user), and create an OAuth client of type *Web application* with the redirect URI
+   `https://developers.google.com/oauthplayground`.
+4. **Refresh token.** In <https://developers.google.com/oauthplayground>: gear icon → *Use your
+   own OAuth credentials* (the client above), scope
+   `https://www.googleapis.com/auth/chromewebstore`, authorise with the owner account,
+   *Exchange authorization code for tokens*, copy the refresh token. While the consent screen
+   is in *Testing*, Google expires refresh tokens after 7 days, so publish the consent screen
+   (it stays unverified, which is fine for your own account).
+5. **GitHub.** Environment `chrome-web-store` (tag rule `v*`, optional required reviewer) with
+   the three secrets; repository variables `CWS_PUBLISHER_ID` and `CWS_ITEM_ID`.
+
+From then on every pushed tag submits the new version.
+
+### Store installs and the bridge
+
+The bridge trusts the extension origins listed under `"extensions"` in
+`~/.browsteer/config.json` and remembers the first one that connects. A store install has a
+different ID from an unpacked one, so someone switching from an unpacked build to the store
+build adds `chrome-extension://<store item ID>` to that list (the hub prints the exact origin
+when it refuses one).
 
 ## Updating the bridge
 
