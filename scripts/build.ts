@@ -40,7 +40,7 @@ function manifest(target: Target) {
       browser_specific_settings: {
         gecko: {
           id: "browsteer-cc@ovi.lt",
-          strict_min_version: "128.0",
+          strict_min_version: "140.0", // 140 (ESR) is the first with data_collection_permissions
           data_collection_permissions: { required: ["none"] },
           ...(updateUrl ? { update_url: updateUrl } : {}),
         },

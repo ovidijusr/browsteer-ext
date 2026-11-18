@@ -49,7 +49,7 @@ mkdir -p ~/.claude/skills && cp -R skill/browse ~/.claude/skills/browse
 `chrome://extensions`, turn on *Developer mode*, choose *Load unpacked* and
 select `dist/chrome`.
 
-**Firefox** (128 or newer): install
+**Firefox** (140 or newer, desktop): install
 [Browsteer from addons.mozilla.org](https://addons.mozilla.org/firefox/addon/browsteer/).
 Firefox keeps it up to date. For a session-only install of your own build,
 open `about:debugging#/runtime/this-firefox`, choose *Load Temporary Add-on…*
