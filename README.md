@@ -249,3 +249,7 @@ bun run test/measure.ts     # snapshot vs raw DOM on your CURRENT active tab
 ```sh
 sqlite3 ~/.browsteer/browsteer.db 'SELECT ts, tool, ref, ok, error FROM actions ORDER BY id DESC LIMIT 20;'
 ```
+
+## License
+
+[MIT](LICENSE). Forks are welcome under the license. Please give a fork its own name, so users can tell it apart from Browsteer.
