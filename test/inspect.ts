@@ -1,8 +1,9 @@
 // Inspect DOM around the car listings to find container/class selectors for a filter.
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const url = "https://autoplius.lt/skelbimai/naudoti-automobiliai";
 const transport = new StdioClientTransport({ command: "bun", args: ["run", "bridge/index.ts"], cwd: ROOT, stderr: "inherit" });
 const client = new Client({ name: "inspect", version: "0.0.0" });

@@ -1,11 +1,12 @@
 // Package both builds into artifacts/:
 //   browsteer-chrome-<version>.zip   upload to the Chrome Web Store, or unzip and "Load unpacked"
 //   browsteer-firefox-<version>.zip  unsigned; `bun run sign:firefox` produces the installable .xpi
+import { fileURLToPath } from "node:url";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { $ } from "bun";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const version: string = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
 const out = join(ROOT, "artifacts");
 mkdirSync(out, { recursive: true });

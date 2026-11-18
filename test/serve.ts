@@ -1,5 +1,6 @@
 // Tiny static server for the test fixture so the content script injects over http.
-const file = Bun.file(new URL("./fixture.html", import.meta.url).pathname);
+import { fileURLToPath } from "node:url";
+const file = Bun.file(fileURLToPath(new URL("./fixture.html", import.meta.url)));
 Bun.serve({
   port: 8080,
   async fetch() {

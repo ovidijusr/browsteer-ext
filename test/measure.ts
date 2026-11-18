@@ -1,9 +1,10 @@
 // Measure, on your CURRENT active tab: compact snapshot vs interactiveOnly vs
 // the real rendered DOM (raw and cleaned). Apples-to-apples, same page.
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const transport = new StdioClientTransport({ command: "bun", args: ["run", "bridge/index.ts"], cwd: ROOT, stderr: "ignore" });
 const client = new Client({ name: "measure", version: "0.0.0" });
 await client.connect(transport);

@@ -5,6 +5,7 @@
 // forwards each call to the shared hub (hub.ts) over a control WebSocket. On first
 // use it lazily spawns the hub DETACHED so the hub outlives this session and the
 // extension stays paired. Many shims (sessions) share one hub.
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -12,7 +13,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { readToken } from "./security";
 
 const HUB_URL = `ws://127.0.0.1:${process.env.BRIDGE_PORT ?? 8787}`;
-const HUB_PATH = new URL("./hub.ts", import.meta.url).pathname;
+const HUB_PATH = fileURLToPath(new URL("./hub.ts", import.meta.url));
 
 let ws: WebSocket | null = null;
 let ensuring: Promise<void> | null = null;

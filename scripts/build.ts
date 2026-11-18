@@ -6,11 +6,12 @@
 // Each output directory is a complete, loadable extension. The two differ only
 // in the manifest (how the background runs, browser-specific keys) and in one
 // extra page-world script that Chrome needs for dialog handling.
+import { fileURLToPath } from "node:url";
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Target = "firefox" | "chrome";
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SRC = join(ROOT, "extension");
 
 const args = process.argv.slice(2);

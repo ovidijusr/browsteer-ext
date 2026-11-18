@@ -1,9 +1,10 @@
 // E2E for Phase 2 pruning filters. Spawns the bridge, launches Firefox on the
 // fixture, then: raw snapshot → save_filter → filtered snapshot → assertions.
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const transport = new StdioClientTransport({ command: "bun", args: ["run", "bridge/index.ts"], cwd: ROOT, stderr: "inherit" });
 const client = new Client({ name: "scan-test", version: "0.0.0" });
 await client.connect(transport);

@@ -1,10 +1,11 @@
 // Fails the build if either built manifest asks for more than docs/PERMISSIONS.md
 // explains. Run after `bun run build`. Adding a permission means changing the
 // list below in the same commit as the documentation.
+import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ALLOWED = {
   permissions: ["alarms", "storage", "tabs", "webRequest"],
   host_permissions: ["<all_urls>"],

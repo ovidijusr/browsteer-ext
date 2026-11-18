@@ -1,10 +1,11 @@
 // Explore any real URL: launch a clean Firefox with the extension, navigate,
 // and print the RAW snapshot + sizes so we can design a pruning filter.
 //   bun run test/explore.ts "https://autoplius.lt/skelbimai/naudoti-automobiliai"
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const url = process.argv[2] ?? "https://autoplius.lt/skelbimai/naudoti-automobiliai";
 
 const transport = new StdioClientTransport({ command: "bun", args: ["run", "bridge/index.ts"], cwd: ROOT, stderr: "inherit" });

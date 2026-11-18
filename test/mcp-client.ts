@@ -5,10 +5,11 @@
 //   3. discover the browser's pairing key, browser_pair, then drive the page
 //
 //   this client ──stdio/MCP──▶ bridge ──ws──▶ extension ──▶ fixture page
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 // 1. Bridge first.
 const transport = new StdioClientTransport({

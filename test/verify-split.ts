@@ -1,8 +1,9 @@
 // Verify the hub/shim split: spawn the shim (as Claude would), it should lazily
 // start the hub and forward a DB-only tool (no browser needed).
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const t = new StdioClientTransport({ command: "bun", args: ["run", "bridge/mcp.ts"], cwd: ROOT, stderr: "inherit" });
 const c = new Client({ name: "verify", version: "0" });
 await c.connect(t);

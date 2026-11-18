@@ -1,5 +1,6 @@
 // Pure-function tests for the hub's security rules:  bun test test/security.test.ts
 import { describe, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
 import { classifyOrigin, extensionAllowed, resolveSavePath, sameSite, siteOf, tokenMatches } from "../bridge/security";
 
 describe("origins", () => {
@@ -49,10 +50,10 @@ describe("sites", () => {
 });
 
 describe("download folder", () => {
-  const dir = "/home/u/Downloads/browsteer";
+  const dir = resolve("/home/u/Downloads/browsteer"); // C:\home\u\… on Windows
   test("bare names and paths inside the folder are accepted", () => {
-    expect(resolveSavePath("report.json", dir)).toEqual({ path: `${dir}/report.json` });
-    expect(resolveSavePath(`${dir}/sub/a.pdf`, dir)).toEqual({ path: `${dir}/sub/a.pdf` });
+    expect(resolveSavePath("report.json", dir)).toEqual({ path: join(dir, "report.json") });
+    expect(resolveSavePath(`${dir}/sub/a.pdf`, dir)).toEqual({ path: join(dir, "sub", "a.pdf") });
   });
   test("anything that escapes it is refused", () => {
     expect("error" in resolveSavePath("../../.ssh/authorized_keys", dir)).toBe(true);

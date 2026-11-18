@@ -4,6 +4,7 @@
 //
 // The fake extension answers ops with canned results, including the tabId that
 // background.ts now reports, which is what auto-pin and drift detection key off.
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,7 +17,7 @@ const wsUrl = () => `ws://127.0.0.1:${PORT}`;
 /** The extension always connects with its Origin; local programs send none. */
 const asExtension = (origin = EXT_ORIGIN) => new WebSocket(wsUrl(), { headers: { Origin: origin } } as any);
 const token = () => readFileSync(join(DB_DIR, "token"), "utf8").trim();
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DB_DIR = mkdtempSync(join(tmpdir(), "browsteer-test-"));
 
 let hub: ReturnType<typeof Bun.spawn>;

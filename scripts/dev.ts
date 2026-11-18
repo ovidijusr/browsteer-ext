@@ -4,11 +4,12 @@
 //   bun run dev chrome     rebuilds dist/chrome on save; reload it from chrome://extensions
 //
 // The bridge is NOT started here — Claude Code starts it through MCP.
+import { fileURLToPath } from "node:url";
 import { watch } from "node:fs";
 import { join } from "node:path";
 
 const target = process.argv.includes("chrome") ? "chrome" : "firefox";
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const build = () => Bun.spawnSync(["bun", "run", join(ROOT, "scripts/build.ts"), target, "--dev"], { stdout: "inherit", stderr: "inherit" });
 
 build();
