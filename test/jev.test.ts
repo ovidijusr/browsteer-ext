@@ -201,3 +201,31 @@ describe("memo target key", () => {
     expect(normTarget("the search box")).not.toBe(normTarget("the search button"));
   });
 });
+
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { saveApiKey } from "../bridge/jev";
+describe("saveApiKey (bun run setup)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "browsteer-key-"));
+  const file = join(dir, "nested", "env");
+
+  test("creates the file with only the key line", () => {
+    saveApiKey("tsk-one", file);
+    expect(readFileSync(file, "utf8")).toBe("TYPESAFE_API_KEY=tsk-one\n");
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  test("replaces the key and keeps every other line", () => {
+    writeFileSync(file, "OTHER=1\r\nTYPESAFE_API_KEY=old\nMORE=2\n");
+    saveApiKey("tsk-two", file);
+    expect(readFileSync(file, "utf8")).toBe("OTHER=1\nMORE=2\nTYPESAFE_API_KEY=tsk-two\n");
+  });
+
+  test("refuses a key with spaces or line breaks", () => {
+    expect(() => saveApiKey("two words", file)).toThrow();
+    expect(() => saveApiKey("a\nTYPESAFE_API_KEY=b", file)).toThrow();
+    expect(() => saveApiKey("", file)).toThrow();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

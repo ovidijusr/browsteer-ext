@@ -6,7 +6,7 @@
 // background.ts now reports, which is what auto-pin and drift detection key off.
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,6 +26,9 @@ let ctl: WebSocket;
 
 /** What the fake extension should answer with next, per op. */
 const canned: Record<string, any> = {};
+/** Messages the hub sent the fake extension on its own ({type: "registered"}, {type: "jev"}). */
+const notes: any[] = [];
+const KEY_FILE = () => join(DB_DIR, "typesafe.env");
 const seenOps: { op: string; params: any }[] = [];
 
 const pending = new Map<string, (m: any) => void>();
@@ -48,9 +51,13 @@ async function waitOpen(ws: WebSocket): Promise<void> {
 }
 
 beforeAll(async () => {
+  // No Jev switch or API key from the machine running the tests: the key file is a temp one.
+  const env: Record<string, string | undefined> = { ...process.env, BRIDGE_PORT: String(PORT), BROWSTEER_DB_DIR: DB_DIR, TYPESAFE_ENV_FILE: KEY_FILE() };
+  delete env.BROWSTEER_JEV;
+  delete env.TYPESAFE_API_KEY;
   hub = Bun.spawn(["bun", "run", "bridge/hub.ts"], {
     cwd: ROOT,
-    env: { ...process.env, BRIDGE_PORT: String(PORT), BROWSTEER_DB_DIR: DB_DIR },
+    env,
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -67,6 +74,7 @@ beforeAll(async () => {
   await waitOpen(ext);
   ext.onmessage = (ev) => {
     const req = JSON.parse(String(ev.data));
+    if (req.type) { notes.push(req); return; }
     seenOps.push({ op: req.op, params: req.params });
     const result = canned[req.op] ?? { url: "https://example.com/", tabId: 7 };
     ext.send(JSON.stringify({ id: req.id, ok: true, result }));
@@ -84,6 +92,9 @@ beforeAll(async () => {
   await Bun.sleep(150);
 
   expect((await ask("pair", { key: KEY })).text).toContain("Paired");
+  // The browser hears that a session paired (the setup guide waits for it).
+  await Bun.sleep(50);
+  expect(notes.some((n) => n.type === "paired")).toBe(true);
 });
 
 afterAll(() => {
@@ -449,5 +460,133 @@ describe("review fixes", () => {
     expect(stolen).not.toBe(null);
     expect(r.text).toContain("genuine");
     expect(r.text).not.toContain("FORGED");
+  });
+});
+
+// browser_upload reads only from the upload folder and sends the bytes to the extension.
+describe("upload", () => {
+  const UP = join(DB_DIR, "upload");
+  const setDir = () => {
+    const file = join(DB_DIR, "config.json");
+    let cfg: any = {}; try { cfg = JSON.parse(readFileSync(file, "utf8")); } catch {}
+    writeFileSync(file, JSON.stringify({ ...cfg, uploadDir: UP }));
+  };
+
+  test("a file from the folder reaches the extension as bytes; the log has no contents", async () => {
+    setDir();
+    mkdirSync(UP, { recursive: true });
+    writeFileSync(join(UP, "icon.png"), "PNGDATA");
+    canned.upload = { url: "https://a.example/edit", tabId: 7, how: "file field" };
+    seenOps.length = 0;
+    const r = await ask("upload", { ref: 4, file: "icon.png" });
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain("Uploaded icon.png (7 B)");
+    const sent = seenOps.find((o) => o.op === "upload")!.params;
+    expect(sent.files).toEqual([{ name: "icon.png", type: "image/png", b64: Buffer.from("PNGDATA").toString("base64") }]);
+  });
+
+  test("anything outside the folder is refused before the browser hears of it", async () => {
+    setDir();
+    writeFileSync(join(DB_DIR, "outside.txt"), "nope");
+    seenOps.length = 0;
+    const r = await ask("upload", { ref: 4, file: "../outside.txt" });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("only be uploaded from");
+    expect(seenOps.some((o) => o.op === "upload")).toBe(false);
+  });
+});
+
+// Semantic targeting can be switched from the extension's own pages: the one hub
+// setting the extension may change. Claude (a controller) cannot, and the API key
+// never travels over the socket.
+describe("semantic targeting switch", () => {
+  const config = () => JSON.parse(readFileSync(join(DB_DIR, "config.json"), "utf8"));
+  /** Send as the registered extension and wait for the hub's {type:"jev"} answer. */
+  async function fromExtension(msg: object): Promise<any> {
+    const before = notes.length;
+    ext.send(JSON.stringify(msg));
+    for (let i = 0; i < 40 && notes.length === before; i++) await Bun.sleep(25);
+    return notes.slice(before).find((n) => n.type === "jev") ?? null;
+  }
+
+  test("registering reports the state: off, no key, no override", () => {
+    const reg = notes.find((n) => n.type === "registered");
+    expect(reg.jev).toEqual({ on: false, keyPresent: false, envOverride: false });
+  });
+
+  test("the extension can turn it on, and the hub saves it in config.json", async () => {
+    const r = await fromExtension({ type: "setJev", on: true });
+    expect(r).toMatchObject({ type: "jev", on: true, keyPresent: false });
+    expect(config().jev).toBe(true);
+    expect(config().extensions).toEqual([EXT_ORIGIN]); // the rest of the file is kept
+  });
+
+  test("a controller cannot change it, even with the token", async () => {
+    ctl.send(JSON.stringify({ type: "setJev", on: false }));
+    await Bun.sleep(120);
+    expect(config().jev).toBe(true);
+  });
+
+  test("an extension socket that has not registered cannot change it", async () => {
+    const r = await knock(asExtension(), { type: "setJev", on: false });
+    expect(r.silent).toBe(true);
+    expect(config().jev).toBe(true);
+  });
+
+  test("anything but a boolean is ignored", async () => {
+    expect(await fromExtension({ type: "setJev", on: "false" })).toBe(null);
+    expect(config().jev).toBe(true);
+  });
+
+  test("turning it off is saved too, and find stops asking Jev", async () => {
+    const r = await fromExtension({ type: "setJev", on: false });
+    expect(r.on).toBe(false);
+    expect(config().jev).toBe(false);
+    canned.snapshot = { ...snapResult("https://a.example/one", 42), tree: 'region\n  [1] button "Go"' };
+    const f = await ask("find", { target: "the thing that exports my data" });
+    expect(f.text).toContain("Semantic targeting is off");
+  });
+
+  test("whether a key exists is reported; the key itself never is", async () => {
+    const secret = "tsk-test-SECRET-0123456789";
+    writeFileSync(KEY_FILE(), `OTHER=1\nTYPESAFE_API_KEY=${secret}\n`);
+    const before = notes.length;
+    const r = await fromExtension({ type: "jevStatus" });
+    expect(r).toEqual({ type: "jev", on: false, keyPresent: true, envOverride: false });
+    expect(JSON.stringify(notes.slice(before))).not.toContain(secret);
+  });
+
+  test("a controller cannot set the API key", async () => {
+    ctl.send(JSON.stringify({ type: "setJevKey", key: "tsk-from-claude-0000" }));
+    await Bun.sleep(120);
+    expect(readFileSync(KEY_FILE(), "utf8")).not.toContain("tsk-from-claude");
+  });
+
+  test("a key with spaces or line breaks is ignored", async () => {
+    expect(await fromExtension({ type: "setJevKey", key: "tsk-a" + String.fromCharCode(10) + "EVIL=1" })).toBe(null);
+    expect(readFileSync(KEY_FILE(), "utf8")).not.toContain("EVIL");
+  });
+
+  test("the Settings page can save a key: written to the key file, Jev on, other lines kept, never echoed", async () => {
+    const secret = "tsk-new-SECRET-9876543210";
+    const before = notes.length;
+    const r = await fromExtension({ type: "setJevKey", key: secret });
+    expect(r).toEqual({ type: "jev", on: true, keyPresent: true, envOverride: false });
+    const file = readFileSync(KEY_FILE(), "utf8");
+    expect(file).toContain(`TYPESAFE_API_KEY=${secret}`);
+    expect(file).toContain("OTHER=1");
+    expect(file.match(/TYPESAFE_API_KEY=/g)!.length).toBe(1);
+    expect(config().jev).toBe(true);
+    expect(JSON.stringify(notes.slice(before))).not.toContain(secret);
+    await fromExtension({ type: "setJev", on: false }); // leave it off for later tests
+  });
+
+  test("the Settings page can remove the key: line gone, other lines kept, Jev off", async () => {
+    await fromExtension({ type: "setJev", on: true });
+    const r = await fromExtension({ type: "removeJevKey" });
+    expect(r).toEqual({ type: "jev", on: false, keyPresent: false, envOverride: false });
+    const file = readFileSync(KEY_FILE(), "utf8");
+    expect(file).not.toContain("TYPESAFE_API_KEY");
+    expect(file).toContain("OTHER=1");
   });
 });

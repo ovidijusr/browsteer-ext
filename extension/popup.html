@@ -6,50 +6,102 @@
   <link rel="stylesheet" href="ui.css" />
 </head>
 <body class="popup">
-  <header>
+  <!-- The state bar: one colour per access state, across the top edge. -->
+  <div class="state-bar" id="bar" data-tone="boot" aria-hidden="true"></div>
+
+  <header class="top">
     <img src="icons/48.png" alt="" />
-    <span>Browsteer</span>
-    <span class="ver" id="ver" title="Installed version"></span>
+    <span class="name">Browsteer</span>
+    <button class="icon-btn" id="settings" type="button" aria-label="Settings" title="Settings"><span data-icon="settings"></span></button>
   </header>
 
-  <button class="key" id="key" type="button" title="Copy the /browse command"><span>bst</span><span>····</span><span>····</span><span>····</span></button>
-
-  <p class="link" id="link" data-state="boot" role="status">
-    <span class="lamp" aria-hidden="true"></span>
-    <span id="linkText">Checking the bridge…</span>
-  </p>
-
-  <p class="warn" id="verWarn" role="status" hidden></p>
-
-  <section class="access" id="access" data-armed="false" aria-label="Access">
-    <p id="accessText">Claude cannot use this browser.</p>
-    <button class="btn primary" id="arm" type="button">Allow Claude for 1 hour</button>
-    <button class="btn" id="disarm" type="button" hidden>Stop now</button>
-  </section>
-
-  <section class="site" id="site" hidden aria-label="This site">
-    <p><strong id="siteHost"></strong> <span id="siteState"></span></p>
-    <div class="row">
-      <button class="btn" id="siteAllow" type="button"></button>
-      <button class="btn quiet" id="siteBlock" type="button">Never here</button>
+  <!-- The answer this popup exists for: may Claude act here, now? -->
+  <section class="status" id="status" data-tone="boot" role="status" aria-live="polite">
+    <span class="status-icon" id="sIcon" data-icon="lock"></span>
+    <div class="status-text">
+      <p class="state" id="sState">Checking…</p>
+      <p class="host" id="sHostLine" hidden><span class="mono" id="sHost"></span><span class="pill" id="sPill" hidden></span></p>
+      <p class="detail" id="sDetail" hidden></p>
+      <p class="time" id="sTime" hidden></p>
+      <p class="note" id="sNote" hidden></p>
+      <button class="link quiet" id="unblock" type="button" hidden></button>
+      <!-- Wide settings in force: the way to change each, inside the same warning. -->
+      <p class="links" id="sLinks" hidden><button class="link" type="button" data-goto="sites" id="lnkSites">Change sites</button><button class="link" type="button" data-goto="access" id="lnkTime">Change time limit</button></p>
     </div>
+    <div class="drain" id="drain" hidden><span id="drainFill"></span></div>
   </section>
 
-  <div class="options">
-    <label><input type="checkbox" id="readOnly" /> Read only: Claude can look but not click or type</label>
-    <button class="btn quiet" id="unlock" type="button" title="A session stays on the site it started on. This lets the current session continue on another site.">Let Claude switch site</button>
+  <!-- Version mismatch between extension and bridge. -->
+  <div class="notice" id="update" hidden>
+    <span data-icon="update" data-size="16"></span>
+    <div>
+      <p id="updText"></p>
+      <button class="link" id="updAct" type="button"></button>
+      <p class="alt" id="updAlt" hidden></p>
+      <code class="chip" id="updCmd" hidden></code>
+    </div>
   </div>
 
-  <div class="actions">
-    <button class="btn" id="copy" type="button">Copy /browse command</button>
-    <button class="btn" id="regen" type="button" title="Replace this browser's key. The old key stops working at once.">New key</button>
+  <!-- Before the bridge has ever been set up, this is the only thing to do. -->
+  <div class="actions" id="setupActions" hidden>
+    <button class="btn primary wide-btn" id="finish" type="button">Finish setup</button>
   </div>
 
-  <footer>
-    <button class="btn quiet" id="pick" type="button" title="Click any element on the page to get its CSS selector">Pick an element</button>
-    <a href="welcome.html" target="_blank" rel="noopener">Sites, setup and privacy</a>
-  </footer>
-  <p class="picked" id="picked" hidden></p>
+  <div id="main">
+    <!-- What Claude may do once open: chosen before granting, so the button says exactly what it grants. -->
+    <div class="mode-wrap" id="modeWrap">
+    <p class="seg-label" id="segLabel">When access opens, Claude may</p>
+    <div class="seg" id="mode" role="radiogroup" aria-labelledby="segLabel">
+      <label><input type="radio" name="mode" value="act" id="modeAct" /> <span><span data-icon="cursor" data-size="14"></span> Read and act</span></label>
+      <label><input type="radio" name="mode" value="read" id="modeRead" /> <span><span data-icon="eye" data-size="14"></span> Read only</span></label>
+    </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn primary" id="primary" type="button"></button>
+      <button class="btn" id="secondary" type="button" hidden></button>
+    </div>
+
+    <!-- Hand-off: the command with this browser's key. -->
+    <div class="handoff">
+      <div class="label-row">
+        <p class="label">Paste into Claude Code, then add your task</p>
+        <button class="link quiet" id="regen" type="button">New key</button>
+      </div>
+      <button class="cmdbox" id="copy" type="button">
+        <code class="mono" id="cmd">/browse bst-····-····-····</code>
+        <span class="act"><span data-icon="copy" data-size="16" id="copyIcon"></span><span id="copyLabel">Copy</span></span>
+      </button>
+      <div class="ask" id="regenAsk" hidden>
+        <p>Replace the key? Claude sessions using the old one stop working.</p>
+        <div><button class="btn small" id="regenNo" type="button">Cancel</button><button class="btn small danger" id="regenYes" type="button">Replace key</button></div>
+      </div>
+    </div>
+
+    <details class="more" id="more">
+      <summary>More</summary>
+      <div class="groups">
+        <ul class="rows" id="rowsSite" aria-label="This site">
+          <li id="rowSwitch"><button type="button" id="unlock"><span data-icon="swap"></span><span><b id="unlockLabel">Let Claude move to another site</b><small>One time, to another site on your allowed list</small></span></button></li>
+          <li id="rowForget" hidden><button type="button" id="forget"><span data-icon="remove"></span><span><b id="forgetLabel">Remove from allowed sites</b></span></button></li>
+          <li id="rowBlock" hidden><button type="button" id="blockSite" class="destructive"><span data-icon="blocked"></span><span><b id="blockLabel">Block this site</b></span></button></li>
+        </ul>
+        <ul class="rows tools" aria-label="Tools">
+          <li><button type="button" id="pick"><span data-icon="target"></span><span><b>Pick an element on the page</b></span></button></li>
+          <li id="rowPicked" hidden><p class="picked" id="picked"></p></li>
+          <li id="rowJev">
+            <label class="switch-row" id="jevRow">
+              <span data-icon="search"></span>
+              <span><b>Find controls by description</b><small id="jevHint">Sends page outlines to TypeSafe</small></span>
+              <input type="checkbox" role="switch" id="jev" />
+            </label>
+            <button type="button" id="jevSetup" hidden><span data-icon="search"></span><span><b>Find controls by description</b><small>Off. Add a TypeSafe key in Settings →</small></span></button>
+            <p class="note" id="jevNote" hidden></p>
+          </li>
+        </ul>
+      </div>
+    </details>
+  </div>
 
   <script src="popup.js"></script>
 </body>

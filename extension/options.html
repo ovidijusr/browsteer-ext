@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Browsteer settings</title>
+  <link rel="icon" href="icons/32.png" />
+  <link rel="stylesheet" href="ui.css" />
+</head>
+<body>
+  <div class="state-bar page-bar" id="bar" data-tone="boot" aria-hidden="true"></div>
+  <main class="settings">
+    <header>
+      <h1><img src="icons/48.png" alt="" /> Settings</h1>
+      <span class="saved" id="saved" role="status" aria-live="polite">Saved</span>
+    </header>
+    <p class="sub">Changes save as soon as you make them. Only you can change these settings; Claude and web pages can't.</p>
+
+    <section id="access" aria-labelledby="accessHead">
+      <h2 id="accessHead">How long access lasts</h2>
+      <p class="sub">After you click Allow in the popup.</p>
+      <fieldset class="choices">
+        <legend class="sr" hidden>How long access lasts</legend>
+        <label class="choice"><input type="radio" name="access" value="hour" /><span><b>One hour, then it locks itself</b><small>Recommended. The popup can reset it to a full hour.</small></span></label>
+        <label class="choice" data-danger><input type="radio" name="access" value="always" id="accessAlways" /><span><b>Until I press Stop <span class="badge">Dangerous</span></b><small>Any Claude Code session with your key can act in this browser at any time, even when you're away.</small></span></label>
+      </fieldset>
+      <div class="confirm" id="confirmAccess" hidden>
+        <p>Remove the 1-hour limit? Access will stay open until you press Stop.</p>
+        <button class="btn" type="button" data-cancel>Cancel</button>
+        <button class="btn danger" type="button" id="yesAccess">Remove limit</button>
+      </div>
+    </section>
+
+    <section id="sites" aria-labelledby="sitesHead">
+      <h2 id="sitesHead">Where Claude can work</h2>
+      <p class="sub">Each Claude session also stays on the site where it started. To let it switch, use More › Let Claude move to another site in the popup.</p>
+      <fieldset class="choices">
+        <legend class="sr" hidden>Where Claude can work</legend>
+        <label class="choice"><input type="radio" name="mode" value="allow" /><span><b>Only the sites I allow</b><small>Recommended. Claude can't touch a site you haven't allowed.</small></span></label>
+        <label class="choice" data-danger><input type="radio" name="mode" value="block" id="modeBlock" /><span><b>Every site, except the ones I block <span class="badge">Dangerous</span></b><small>Includes your email, your bank and every site you're signed in to. A page could trick Claude into acting on any of them.</small></span></label>
+      </fieldset>
+      <div class="confirm" id="confirmSites" hidden>
+        <p>Let Claude work on every site you don't block, including your email and bank?</p>
+        <button class="btn" type="button" data-cancel>Cancel</button>
+        <button class="btn danger" type="button" id="yesSites">Allow every site</button>
+      </div>
+
+      <label class="field-label" for="newSite" id="addLabel">Add a site</label>
+      <form class="add" id="addSite" novalidate>
+        <input id="newSite" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="example.com" aria-label="Site address" aria-describedby="siteError" />
+        <button class="btn" type="submit" value="allowSite" id="addAllow">Allow</button>
+        <button class="btn" type="submit" value="blockSite" id="addBlock">Block</button>
+      </form>
+      <p class="error" id="siteError" hidden></p>
+      <p class="added" id="siteAdded" role="status" aria-live="polite" hidden></p>
+
+      <div id="allowedBlock"><p class="list-head">Allowed <span class="list-note" id="allowedNote" hidden>· not used while Every site is on</span></p><ul class="sites" id="allowed"></ul></div>
+      <div id="blockedBlock"><p class="list-head">Blocked</p><ul class="sites" id="blocked"></ul></div>
+      <p class="empty" id="noSites">No sites yet. Allow one here, or from the popup while you're on it.</p>
+    </section>
+
+    <section id="jev" aria-labelledby="jevHead">
+      <h2 id="jevHead">Find controls by description <span class="tag">Optional</span></h2>
+      <p class="sub">Claude asks for “the Save button” instead of reading the whole page first, which is faster on large pages. It uses Jev, a paid model from TypeSafe.</p>
+      <p class="privacy">While it's on, each lookup sends the page address, title, control names and visible text to <code>api.typesafe.ai</code>. Password values never leave this computer.</p>
+
+      <p class="hint-box" id="jevOff" hidden></p>
+
+      <ol class="steps" id="jevSetup" hidden>
+        <li>Create an API key at <a href="https://console.typesafe.ai/keys" rel="noopener" target="_blank">console.typesafe.ai/keys</a>.</li>
+        <li>
+          <span>Paste it here.</span>
+          <form class="add" id="jevKeyForm" novalidate>
+            <input id="jevKey" type="password" autocomplete="off" spellcheck="false" placeholder="TypeSafe API key" aria-label="TypeSafe API key" aria-describedby="keyError" />
+            <button class="btn primary" type="submit">Save key</button>
+            <button class="btn" type="button" id="keyCancel" hidden>Cancel</button>
+          </form>
+          <p class="error" id="keyError" hidden></p>
+          <small>Saved in <code>~/.config/typesafe/env</code>, readable only by you. Never stored in the browser.</small>
+        </li>
+      </ol>
+
+      <div class="jev-on" id="jevReady" hidden>
+        <label class="switch-line"><span>Send page outlines to TypeSafe<small id="jevNote">Key saved in ~/.config/typesafe/env</small></span><input type="checkbox" role="switch" id="jevSwitch" /></label>
+        <div class="key-actions"><button class="link" type="button" id="jevReplace">Replace key</button><button class="link danger-link" type="button" id="jevRemove">Delete key</button></div>
+      </div>
+
+    </section>
+
+    <footer>
+      <a href="https://github.com/ovidijusr/browsteer-ext/blob/main/PRIVACY.md" rel="noopener" target="_blank">Privacy</a>
+      <a href="https://github.com/ovidijusr/browsteer-ext/blob/main/SECURITY.md" rel="noopener" target="_blank">Security</a>
+      <a href="welcome.html">Setup guide</a>
+      <span class="ver" id="ver"></span>
+    </footer>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

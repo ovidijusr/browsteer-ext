@@ -1,84 +1,96 @@
-// Setup page, opened once after install and from the popup. It shows the live
-// key and bridge state so the steps tick themselves off as they happen, and it
-// is where the list of sites is managed.
+// Setup guide, opened once after install (and from the popup's "Finish setup").
+// One step per screen, with a picture of the step beside it. Steps 1 and 2 move
+// on by themselves when the bridge connects and when a site is allowed; a step
+// that is already done is skipped. Step 3 ends when Claude pairs (or on Skip), which records that setup is
+// finished, so nothing opens this page again by itself.
 import { ext } from "./ext";
-import { command, copyWithFeedback, getStatus, renderKey, renderLink, send, type Status } from "./keyview";
-import { hostOf } from "./policy";
+import { drawIcons, setIcon } from "./icons";
+import { command, copyWithFeedback, getStatus, send, setText, type Status } from "./keyview";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+let step = 0;
+let skipped = false;
+const openedAt = Date.now();
+// How long a step waits before it offers help. The UI harness shortens it to show the state.
+const PATIENCE = (globalThis as any).__browsteerPatienceMs ?? 90_000;
 let key = "";
-let drawn = "";
+
+let stepStarted = Date.now();
+function show(next: number) {
+  if (next === step) return;
+  const first = step === 0;
+  step = next;
+  stepStarted = Date.now();
+  for (let i = 1; i <= 4; i++) $(`s${i}`).hidden = i !== step;
+  for (const f of document.querySelectorAll<HTMLElement>("[data-fig]")) f.hidden = f.dataset.fig !== String(step);
+  for (const li of document.querySelectorAll<HTMLElement>("#nav li")) {
+    const n = Number(li.dataset.step);
+    li.dataset.state = n < step ? "done" : n === step ? "now" : "next";
+    if (n === step) li.setAttribute("aria-current", "step"); else li.removeAttribute("aria-current");
+    li.querySelector(".n")!.textContent = n < step ? "✓" : String(n);
+  }
+  $("nav").hidden = step === 4;
+  document.title = step === 4 ? "Browsteer is ready" : `Set up Browsteer: step ${step} of 3`;
+  // Move focus to the new screen's heading, so a screen reader announces it.
+  if (!first) {
+    const h = $(`h${step}`);
+    h.tabIndex = -1;
+    h.focus();
+  }
+}
 
 function render(s: Status | null) {
   if (!s) return;
   key = s.key;
-  renderKey($("key"), s.key);
-  renderLink($("link"), $("linkText"), s.connected,
-    "Bridge not running yet.", "Follow the steps below; this page updates by itself.");
-  $("cmd-browse").textContent = `${command(s.key)}summarise the page I have open`;
-  // Finding the bridge proves the first two steps happened.
-  $("step-bridge").dataset.done = String(s.connected);
-  $("step-start").dataset.done = String(s.connected);
-  $("step-arm").dataset.done = String(s.armed && (s.settings.siteMode === "block" || s.settings.allow.length > 0));
-
-  // Sites: redraw only when the list changed, so focus and hover are not lost every poll.
-  const { siteMode, allow, block } = s.settings;
-  const sig = JSON.stringify([siteMode, allow, block]);
-  if (sig === drawn) return;
-  drawn = sig;
-  for (const r of document.querySelectorAll<HTMLInputElement>("input[name=mode]")) r.checked = r.value === siteMode;
-  const rows = [...block.map((h) => [h, "Blocked"] as const), ...allow.map((h) => [h, "Allowed"] as const)]
-    .sort((a, b) => a[0].localeCompare(b[0]));
-  $("noSites").hidden = rows.length > 0;
-  $("sites").replaceChildren(...rows.map(([host, state]) => {
-    const li = document.createElement("li");
-    const name = document.createElement("code");
-    name.textContent = host;
-    const tag = document.createElement("span");
-    tag.textContent = state;
-    tag.dataset.state = state.toLowerCase();
-    const rm = document.createElement("button");
-    rm.type = "button";
-    rm.className = "btn quiet";
-    rm.textContent = "Remove";
-    rm.setAttribute("aria-label", `Remove ${host}`);
-    rm.addEventListener("click", () => send("forgetSite", { host }).then(render));
-    li.append(name, tag, rm);
-    return li;
-  }));
+  $("cmdBrowse").textContent = command(s.key).trim();
+  $("figKey").textContent = s.key;
+  if (step === 0 && s.setupDone) return show(4);
+  if (step === 4) return;
+  // Step 3 is done when a Claude Code session pairs with this browser after the page opened.
+  if (step === 3 && s.pairedAt > openedAt) { send("finishSetup"); $("live").textContent = "Claude paired with this browser. Next time:"; return show(4); }
+  // Taking long: say so, and offer the usual fixes.
+  const late = Date.now() - stepStarted > PATIENCE;
+  if (step === 1 && late) { lateLine(1, "Still waiting. Check that Claude Code finished running `bun run setup`, and keep this tab open."); $("stuck1").hidden = false; }
+  if (step === 3 && late) lateLine(3, "No pairing yet. Check that you pasted the whole line, bst-… included. If Claude Code says /browse is unknown, start a new Claude Code session: setup added the command.");
+  const allowed = s.armed && (s.settings.siteMode === "block" || s.settings.allow.length > 0);
+  const due = !s.connected ? 1 : !(allowed || skipped) ? 2 : 3;
+  // Forward only: a bridge that drops for a moment does not send the person back.
+  show(Math.max(step, due));
 }
 
-for (const r of document.querySelectorAll<HTMLInputElement>("input[name=mode]")) {
-  r.addEventListener("change", () => r.checked && send("setSiteMode", { value: r.value }).then(render));
+/** A waiting line that has waited too long: amber, a clock instead of the spinner. */
+function lateLine(n: number, text: string) {
+  const line = $(`wait${n}`);
+  if (line.dataset.late !== undefined) return;
+  line.dataset.late = "";
+  const clockIcon = document.createElement("span");
+  setIcon(clockIcon, "clock");
+  $(`spin${n}`).replaceWith(clockIcon);
+  setText($(`wait${n}Text`), text);
 }
 
-// Accepts "example.com", "https://example.com/some/page" or "*.example.com".
-$<HTMLFormElement>("addSite").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const input = $<HTMLInputElement>("newSite");
-  const raw = input.value.trim().replace(/^\*\./, "");
-  const host = hostOf(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-  if (!host || !host.includes(".")) { input.setCustomValidity("Enter a site address, like example.com"); input.reportValidity(); return; }
-  const type = ((e as SubmitEvent).submitter as HTMLButtonElement | null)?.value ?? "allowSite";
-  input.value = "";
-  send(type, { host }).then(render);
-});
-$("newSite").addEventListener("input", () => $<HTMLInputElement>("newSite").setCustomValidity(""));
+/** Copy, and say so on the button's label for two seconds. */
+function copyButton(btn: HTMLElement, text: () => string) {
+  const label = btn.querySelector("span:last-child") as HTMLElement;
+  btn.addEventListener("click", () => copyWithFeedback(label, text(), "Copied"));
+}
+for (const btn of document.querySelectorAll<HTMLElement>("[data-copy]")) copyButton(btn, () => $(btn.dataset.copy!).textContent ?? "");
+copyButton($("copyKey"), () => command(key));
+$("copyKey").addEventListener("click", () => { setIcon($("copyKeyIcon"), "open"); setTimeout(() => setIcon($("copyKeyIcon"), "copy"), 1600); });
 
-$("key").addEventListener("click", async () => {
-  if (!key) return;
-  await navigator.clipboard.writeText(command(key));
-  $("linkText").textContent = "Copied the /browse command.";
-  // Clearing the state makes the next refresh redraw the bridge line.
-  setTimeout(() => { $("link").dataset.state = ""; refresh(); }, 1400);
+$("skip").addEventListener("click", () => { skipped = true; show(3); });
+
+$("done").addEventListener("click", async () => {
+  await send("finishSetup");
+  show(4);
 });
 
-for (const btn of document.querySelectorAll<HTMLElement>("[data-copy]")) {
-  btn.addEventListener("click", () => copyWithFeedback(btn, $(btn.dataset.copy!).textContent ?? ""));
-}
+$("close").addEventListener("click", async () => {
+  try { const tab = await ext.tabs.getCurrent(); if (tab?.id != null) await ext.tabs.remove(tab.id); } catch {}
+  window.close();
+});
 
-$("ver").textContent = `v${ext.runtime.getManifest().version}`;
-
+drawIcons();
 const refresh = () => getStatus().then(render);
 refresh();
 setInterval(refresh, 1500);

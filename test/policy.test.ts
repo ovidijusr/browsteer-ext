@@ -1,6 +1,6 @@
 // The extension's access rules:  bun test test/policy.test.ts
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SETTINGS, KEY_RE, covers, genKey, isWrite, refusal, siteAllowed, type Settings } from "../extension/src/policy";
+import { ARM_MINUTES, DEFAULT_SETTINGS, FOREVER, KEY_RE, alwaysOnPatch, armUntil, covers, genKey, isArmed, isWrite, refusal, siteAllowed, type Settings } from "../extension/src/policy";
 import { needsGuard } from "../extension/src/risk";
 
 const NOW = 1_800_000_000_000;
@@ -15,6 +15,28 @@ describe("pairing key", () => {
   test("skips bytes that would bias the alphabet", () => {
     const bytes = [255, 250, 248, ...Array.from({ length: 21 }, (_, i) => i)];
     expect(genKey(() => new Uint8Array(bytes))).toBe("bst-abcd-efgh-jkmn");
+  });
+});
+
+describe("access window", () => {
+  const HOUR = ARM_MINUTES * 60_000;
+  test("off by default: allowing opens for an hour", () => {
+    expect(DEFAULT_SETTINGS.alwaysOn).toBe(false);
+    expect(armUntil(DEFAULT_SETTINGS, NOW)).toBe(NOW + HOUR);
+  });
+  test("always on: allowing opens until Stop", () => {
+    const s = { ...DEFAULT_SETTINGS, alwaysOn: true };
+    expect(armUntil(s, NOW)).toBe(FOREVER);
+    expect(isArmed({ ...s, armedUntil: FOREVER }, NOW + 10 * 365 * 86_400_000)).toBe(true);
+    expect(new Date(FOREVER).getTime()).toBe(FOREVER); // still a valid date
+  });
+  test("turning it on while locked does not open access", () => {
+    expect(alwaysOnPatch(DEFAULT_SETTINGS, true, NOW)).toEqual({ alwaysOn: true });
+  });
+  test("turning it on while open extends; turning it off caps at an hour", () => {
+    expect(alwaysOnPatch(armed(), true, NOW)).toEqual({ alwaysOn: true, armedUntil: FOREVER });
+    expect(alwaysOnPatch(armed({ alwaysOn: true, armedUntil: FOREVER }), false, NOW)).toEqual({ alwaysOn: false, armedUntil: NOW + HOUR });
+    expect(alwaysOnPatch(armed(), false, NOW)).toEqual({ alwaysOn: false, armedUntil: NOW + 60_000 });
   });
 });
 

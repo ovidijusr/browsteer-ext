@@ -64,7 +64,7 @@ for (const target of targets) {
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
 
-  const entries = ["background", "content", "popup", "welcome", ...(target === "chrome" ? ["dialogs-main"] : [])];
+  const entries = ["background", "content", "popup", "welcome", "options", ...(target === "chrome" ? ["dialogs-main"] : [])];
   const res = await Bun.build({
     entrypoints: entries.map((e) => join(SRC, "src", `${e}.ts`)),
     outdir: out,
@@ -76,7 +76,7 @@ for (const target of targets) {
   });
   if (!res.success) { for (const l of res.logs) console.error(l); process.exit(1); }
 
-  for (const f of ["popup.html", "welcome.html", "ui.css"]) cpSync(join(SRC, f), join(out, f));
+  for (const f of ["popup.html", "welcome.html", "options.html", "ui.css"]) cpSync(join(SRC, f), join(out, f));
   cpSync(join(SRC, "icons"), join(out, "icons"), { recursive: true });
   writeFileSync(join(out, "manifest.json"), JSON.stringify(manifest(target), null, 2) + "\n");
   console.log(`built dist/${target}  v${version}${dev ? "  (dev)" : ""}${port === "8787" ? "" : `  (bridge port ${port})`}`);

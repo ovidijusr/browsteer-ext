@@ -13,8 +13,8 @@ keeps, and what leaves the machine.
   opened by web pages, and requires a secret that only your user can read.
 - Nothing is read until you allow access for an hour, and then only on sites
   you have allowed.
-- Page content reaches Claude only because Claude Code asked the bridge for it
-  during a session where you pasted this browser's pairing key.
+- Page content reaches Claude only when Claude Code asks the bridge for it, in
+  a session where you pasted this browser's pairing key.
 - One optional feature, semantic targeting, sends page outlines to a third
   party. It is off unless you turn it on.
 
@@ -25,7 +25,7 @@ keeps, and what leaves the machine.
 | Reads | The page in the tab Claude is working in, if its site is allowed: visible text, controls, links and, on request, HTML. Titles and addresses of tabs on allowed sites. Password field contents are never included. |
 | Acts | Clicks, typing, key presses, navigation and same-site requests in that tab, using the sessions you are signed in to. |
 | Keeps in memory | The address, method, status and content type of the last 300 requests sent to allowed sites, from any tab, while access is on, so Claude can find a page's own API. No request or response contents. Cleared when the browser or the extension restarts. Never written to disk. |
-| Stores | In extension storage: the pairing key, your access settings (allowed and blocked sites, read-only, when access ends) and the selector of the last element you picked. |
+| Stores | In extension storage: the pairing key, your access settings (allowed and blocked sites, read-only, when access ends) the selector of the last element you picked, and whether the setup guide was finished. |
 | Sends | Only to the local bridge, and only in reply to a request from it. |
 | Dialogs | For one minute after each request from Claude, a page's `alert` is answered automatically and its text reported, so a dialog cannot freeze the tab; `confirm` and `prompt` still wait for you unless Claude set an answer for the next one. At all other times dialogs are the browser's own. |
 
@@ -55,8 +55,14 @@ up to 60,000 characters) to `api.typesafe.ai`.
 
 This is off by default. It is on only if `~/.browsteer/config.json` contains
 `{"jev": true}` or the hub is started with `BROWSTEER_JEV=1`, and a
-`TYPESAFE_API_KEY` is present. The hub prints the current state when it starts.
-Do not turn it on for pages whose content must not leave your organisation.
+`TYPESAFE_API_KEY` is present. You can switch it under *More* in the
+popup, in Settings, or with `bun run setup`; the popup and Settings show
+whether it is on and whether the bridge has a key. The key itself stays on
+this computer: pasted into Settings or typed into `bun run setup`, it is saved
+in `~/.config/typesafe/env` (or set `TYPESAFE_API_KEY` in the bridge's
+environment). The extension passes a pasted key to the bridge and does not
+keep it. The hub prints the current state when it starts. Do not turn it on
+for pages whose content must not leave your organisation.
 
 ## Pairing key
 
@@ -69,7 +75,7 @@ limits you set in the popup, so treat the key like access to the profile.
 
 ## Stopping
 
-- *Stop now* in the popup closes access at once; it also closes by itself after an hour.
+- *Stop now* in the popup closes access at once. Access also closes by itself after an hour.
 - *New key* in the popup ends the current pairing.
 - Disabling or removing the extension ends all access.
 - `bun run hub:stop` stops the bridge.

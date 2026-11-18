@@ -1,255 +1,197 @@
 # Browsteer
 
-Browsteer lets Claude Code read and operate the pages open in your own Chrome
-or Firefox, where you are already signed in. It is a browser extension and a
-local MCP server. Claude sees each page as a compact accessibility snapshot
-instead of raw HTML, then clicks buttons, fills forms, and reads values by
-reference.
+Browsteer lets Claude Code read and use the pages in your own browser, where
+you are already signed in, on the sites you allow and only while you allow it.
 
-Use it for work that needs your logged-in browser: filling a form on a site
-with no API, comparing listings across tabs, or reading a dashboard behind
-single sign-on.
+<p>
+  <img src="docs/ui/09-popup-locked-site-not-allowed.png" width="300" alt="Browsteer popup, locked: one button allows the site and opens access for an hour">
+  <img src="docs/ui/12-popup-open-working.png" width="300" alt="Browsteer popup, open: Claude can act on github.com for 42 more minutes, with Stop now">
+</p>
 
+```mermaid
+flowchart LR
+    claude["Claude Code<br/>/browse key task"]
+    bridge["Bridge on your computer<br/>127.0.0.1 only, token required<br/>one site per session"]
+    ext["Browsteer extension<br/>locked until you allow it"]
+    tab["Your tab<br/>allowed sites only"]
+    claude -- "MCP" --> bridge
+    bridge -- "local WebSocket" --> ext
+    ext -- "snapshot, click, fill, read" --> tab
 ```
-browser extension        hub (one local daemon)          per-session MCP shims
- content script ─ws:8787─▶ bridge/hub.ts ◀─ws:8787─ bridge/mcp.ts ─stdio─▶ claude (session A)
- (snapshot, click,         127.0.0.1 only                 bridge/mcp.ts ─stdio─▶ claude (session B)
-  fill, read)              ~/.browsteer/browsteer.db
-```
 
-One hub process (`bridge/hub.ts`) owns the browser connection and keeps running
-across sessions. Claude Code starts a small MCP shim (`bridge/mcp.ts`) for each
-session. The shim forwards `browser_*` calls to the hub and starts the hub if
-it is not running.
+Claude sees each page as a short text outline of its headings, text, and
+controls, not raw HTML. It then clicks, types, and reads by pointing at lines
+in that outline. Browsteer works in Chrome, Edge, Brave, and Firefox.
 
-Access is closed by default. Claude can use the browser only while you have
-allowed it for an hour, only on sites you have allowed, and one site per
-session. [SECURITY.md](SECURITY.md) lists every limit and what it does not
-cover, [PRIVACY.md](PRIVACY.md) says what is kept and what leaves the machine,
-and [docs/PERMISSIONS.md](docs/PERMISSIONS.md) explains every permission the
-extension asks for.
+## What it is good for
 
-## Setup
+Use it for work that needs your signed-in browser:
 
-Requires [Bun](https://bun.sh) 1.3 or newer.
+- Fill in a long form on a site that has no API.
+- Compare car or flat listings across several tabs and put them in a table.
+- Read the numbers on a dashboard behind single sign-on.
+- Find the JSON request a page makes, then fetch the data directly.
+- Attach a file to a form, from one upload folder you control.
+
+## Quickstart
+
+You need [Claude Code](https://claude.com/claude-code) and
+[Bun](https://bun.sh) 1.3 or newer.
+
+1. Get the bridge and connect it to Claude Code. The easy way is to paste this
+   into Claude Code:
+
+   ```
+   Set up Browsteer for me: clone https://github.com/ovidijusr/browsteer-ext and run `bun run setup` in it.
+   ```
+
+   Or run it yourself:
+
+   ```sh
+   git clone https://github.com/ovidijusr/browsteer-ext && cd browsteer-ext && bun run setup
+   ```
+
+   Setup installs the dependencies, builds the extension, adds Browsteer to
+   Claude Code as an MCP server and adds the `/browse` command. The bridge it
+   starts listens only on `127.0.0.1`.
+
+2. Install the extension. Firefox users get it from
+   [addons.mozilla.org](https://addons.mozilla.org/firefox/addon/browsteer/).
+   For Chrome, Edge, and Brave, see [Install the extension](#install-the-extension).
+
+3. Open the page you want help with and click the Browsteer toolbar button.
+   Click **Allow ‹site› and open for 1 hour**, then **Copy** the `/browse`
+   command. Paste it into Claude Code and add your task:
+
+   ```
+   /browse bst-ab12-cd34-ef56 list the open pull requests on this page
+   ```
+
+## Safe by default
+
+Your browser holds your accounts, so Browsteer starts locked and stays narrow.
+You set these limits in the popup and in Settings. Neither Claude nor the
+bridge can change them.
+
+- **Locked until you open it.** Access lasts one hour and then closes by
+  itself. **Stop now** closes it at once.
+- **Only the sites you allow.** No site is allowed at first. Tabs on other
+  sites are not even listed by name.
+- **One site per session.** A session stays on the site where it started,
+  unless you choose **More › Let Claude move to another site**.
+- **Read only, if you want it.** Choose it in the popup before you open access.
+  Claude can then look but not click, type, or navigate.
+- **Final-sounding buttons need your yes.** Claude does not click buttons such
+  as delete, pay, send, or sign out unless it says that you agreed.
+- **Passwords stay hidden.** Password fields are always masked, and the log
+  records typed text as a length only.
+- **Uploads from one folder.** `browser_upload` sends only files you put in
+  `~/Downloads/browsteer-upload`, up to 10 MB.
+- **Local only.** The bridge listens on `127.0.0.1`, refuses connections from
+  web pages, and requires a secret that only your user account can read.
+
+Two wider options exist in **Settings** (the sliders icon in the popup), off by
+default and marked dangerous: access *until I press Stop*, and *every site
+except the ones I block*. Each asks for a confirmation, and while either is on
+the popup turns red and says so.
+
+A page can contain text that tries to trick Claude. These limits bound what a
+fooled Claude can do, but on an allowed site it can still use ordinary
+controls. Turn on read only when Claude only needs to look.
+[SECURITY.md](SECURITY.md) lists every limit and what it does not cover.
+
+Browsteer has no analytics and sends nothing off your computer by itself. What
+Claude reads becomes part of your Claude Code conversation. The one exception
+is semantic targeting, which is off by default; see
+[Find controls by description](#find-controls-by-description).
+[PRIVACY.md](PRIVACY.md) has the details.
+
+## Install the extension
+
+**Firefox** 140 or newer, desktop: install
+[Browsteer from addons.mozilla.org](https://addons.mozilla.org/firefox/addon/browsteer/).
+Firefox keeps it up to date.
+
+**Chrome** 116 or newer, and Edge and Brave the same way:
+
+1. Open `chrome://extensions` and turn on **Developer mode**.
+2. Click **Load unpacked** and select the `dist/chrome` folder in your
+   checkout. `bun run setup` builds that folder.
+
+A setup guide opens after you install the extension. It moves on by itself as
+the bridge connects, a site is allowed, and Claude pairs.
+
+<p>
+  <img src="docs/ui/01-setup-1-connect.png" width="620" alt="Setup guide, step 1: paste a prompt into Claude Code to install the bridge">
+</p>
+
+<details>
+<summary>Manual setup, without <code>bun run setup</code></summary>
+
+Run these from the repository root:
 
 ```sh
-git clone <this repository> browsteer && cd browsteer
 bun install
-bun run build          # → dist/chrome and dist/firefox
-
-# Register the bridge with Claude Code (run from the repository root)
+bun run build          # writes dist/chrome and dist/firefox
 claude mcp add -s user browsteer -- bun run "$PWD/bridge/mcp.ts"
-
-# Optional: the /browse slash command
 mkdir -p ~/.claude/skills && cp -R skill/browse ~/.claude/skills/browse
 ```
 
-**Chrome** (116 or newer; Edge and Brave work the same way): open
-`chrome://extensions`, turn on *Developer mode*, choose *Load unpacked* and
-select `dist/chrome`.
+The last line installs the `/browse` command. To try your own Firefox build for
+one session, open `about:debugging#/runtime/this-firefox`, click
+**Load Temporary Add-on**, and select `dist/firefox/manifest.json`.
 
-**Firefox** (140 or newer, desktop): install
-[Browsteer from addons.mozilla.org](https://addons.mozilla.org/firefox/addon/browsteer/).
-Firefox keeps it up to date. For a session-only install of your own build,
-open `about:debugging#/runtime/this-firefox`, choose *Load Temporary Add-on…*
-and select `dist/firefox/manifest.json`.
-
-A setup page opens after install. It shows this browser's pairing key and turns
-green once the bridge is found.
-
-> The hub listens on `127.0.0.1:8787`. To use another port, set `BRIDGE_PORT`
-> both when building the extension (`BRIDGE_PORT=8799 bun run build`) and in the
-> environment the hub and MCP shim run in.
+</details>
 
 ## Updating
 
-```sh
-bun run update      # pull, install, rebuild dist/, restart the hub
-```
-
-Firefox updates the extension from addons.mozilla.org (about:addons →
-⚙ → *Check for Updates* to do it now). Chrome and temporary installs need
-**Reload** on the extensions page after `bun run update`. The popup and
-`browser_pair` say when the extension and the bridge are on different versions.
-How releases are signed and published: [docs/RELEASING.md](docs/RELEASING.md).
-
-## Use it
-
-Open the page you want help with and click the Browsteer toolbar button:
-
-1. **Allow Claude for 1 hour.** Access closes by itself afterwards; *Stop now* closes it at once.
-2. **Allow** the site in the tab. Sites you have not allowed cannot be read or operated.
-3. **Copy /browse command**, paste it into Claude Code and add a task:
-
-```
-/browse bst-ab12-cd34-ef56 list the open pull requests on this page
-```
-
-Optional switches in the popup: **Read only** (Claude can look but not click or
-type) and **Let Claude switch site** (a session stays on the site it started
-on; this lets the current one continue elsewhere).
-
-The `/browse` skill calls `browser_pair(key)`, then works with
-`browser_snapshot` / `browser_click` / `browser_fill` / `browser_read`. Refs
-come from the latest snapshot and are invalid after navigation. For a form that
-won't submit, `browser_form` lists every control's live state (value,
-`*checked`, chosen option, required, error text, hidden `<select>`s behind
-custom dropdowns) and each submit's `*disabled` in one call.
-
-To stop the hub: `bun run hub:stop`. To cut off a paired session: *New key* in
-the popup.
-
-### Semantic targeting (optional, off by default)
-
-`browser_find`, `browser_pursue` and `browser_do` can locate controls from a
-description ("the export button next to the date range") by asking Jev, a
-TypeSafe model. That sends an outline of the current page to `api.typesafe.ai`,
-so it is **off** unless you turn it on:
+When the extension and the bridge are on different versions, the popup says so
+and offers a prompt to paste into Claude Code, which runs the update for you.
+By hand:
 
 ```sh
-echo '{"jev": true}' > ~/.browsteer/config.json     # plus TYPESAFE_API_KEY
-bun run hub:stop                                    # the next session restarts the hub
+bun run update      # pull, install, rebuild dist/, restart the bridge
 ```
 
-While off, `browser_find` still resolves targets that name a control exactly
-and ones it has learned before, both without any network call; `browser_pursue`
-is unavailable; and clicks on controls that sound irreversible are refused.
+Firefox and the Chrome Web Store update the extension by themselves. An
+unpacked Chrome install needs **Reload extension** in the popup (or on the
+extensions page) after `bun run update`.
 
-## Develop
+## Find controls by description
 
-```sh
-bun run dev            # Firefox: rebuild on save, auto-reload in a throwaway profile
-bun run dev chrome     # Chrome: rebuild dist/chrome on save; reload from chrome://extensions
-bun run typecheck
-bun test
-bun run package        # → artifacts/browsteer-{chrome,firefox}-<version>.zip
-```
+`browser_find`, `browser_pursue`, and `browser_do` can find a control from a
+description, such as "the export button next to the date range". They do this
+by asking Jev, a paid model run by TypeSafe. Each question sends an outline of
+the page to `api.typesafe.ai`, so the feature is off unless you turn it on.
 
-The version lives in `package.json`; the build writes it into both manifests.
-After a content-script change, reload the target tab so the new script is
-injected.
+To turn it on, create a key at
+[console.typesafe.ai/keys](https://console.typesafe.ai/keys) and paste it into
+**Settings › Find controls by description**. The bridge saves it in
+`~/.config/typesafe/env`, readable only by you; the browser does not keep it.
+`bun run setup` can also ask for the key.
 
-### Pairing model
+While it is off, `browser_find` still finds controls named exactly and ones it
+has learned before, without any network call.
 
-The extension generates a key, persists it, and registers under it at the
-bridge. The bridge keeps a `key → socket` registry; `browser_pair(key)` selects
-the active browser — so several browsers can be connected and addressed by key.
-The key is both selector and shared secret (only someone who sees the popup can
-drive that browser).
+## Stop
 
-> **MV3 gotcha:** the extension's `connect-src` CSP must list the bridge socket
-> (`ws://127.0.0.1:8787`) or the WebSocket is blocked *silently*. See
-> `extension/manifest.base.json`.
+- **Stop now** in the popup closes access at once.
+- **New key** in the popup ends the current pairing.
+- `bun run hub:stop` stops the bridge.
 
-## The one knob that matters
+## Learn more
 
-`classify()` in `extension/src/snapshot.ts` decides what becomes a snapshot line.
-It is the salience policy — the lever between "too noisy / too many tokens" and
-"missed the price / the button". Tune it as you learn what real booking pages need.
-
-## Reduction passes
-
-Beyond the a11y reduction, three structural passes run on every snapshot. Each is
-reported in the response header (`Reduced: collapsed 30, deduped 19, chrome 2`)
-and all three are switched off by `raw: true`.
-
-| Pass | What it does | Why |
-|------|--------------|-----|
-| **collapse** | Runs of 5+ childless look-alike sibling controls become one ranged line, `[13-43] button "Weiter 1…Weiter 31" ×31 collapsed`. Every ref in the range is still individually clickable. | A 31-photo gallery shipped 31 refs of zero information on every listing page. |
-| **dedup** | A subtree repeated verbatim later on the page becomes `↩ identical to an earlier block (14 lines omitted, refs [92-96] still clickable)`. | autoplius renders its whole financing calculator twice, byte-identical. |
-| **chrome** | Drops `footer`/`[role=contentinfo]`, Google-Maps widgets (`.gm-style`), and consent containers addressed by their own well-known ids. | ~20 refs of legal links and map zoom controls per page. |
-
-**The asymmetry that shapes the design:** over-collapsing a gallery costs
-nothing; silently dropping the block that held the one number you needed costs a
-wrong answer nobody detects. So structural collapsing is automatic and universal,
-while anything semantic stays explicit — hence no fuzzy class matching in the
-chrome list, a length cap on collapsible names (result cards digit-normalise to
-the same skeleton as `"Weiter 1"`, and folding *them* would hide 20 distinct
-cars — see the regression test), and refs preserved on every elided block.
-
-## Getting off a list page cheaply
-
-Extraction filters append an implicit `url` column, with the shared head and tail
-of the hrefs hoisted into the legend once:
-
-```
-# mobile-de-srp | 20 items | id;title;price;specs;url
-# url = "https://suchen.mobile.de/fahrzeuge/details.html?id=" + <url> + "&con=USED&…&vc=Car"
-[1] M50 M Sport Pro AHK Laser HUD;46.940 €;EZ 05/2023 • 67.675 km;453073528
-```
-
-`browser_links` does the same for an arbitrary page or subtree. Both exist to
-kill the old four-call detour to reach one result: *snapshot → browser_html(ref)
-→ parse the href out of truncated HTML → navigate*.
-
-## Tab targeting
-
-The first op that reaches a tab **auto-pins** to it and says so, so a later call
-can't quietly answer about whatever the user happened to focus. If an unpinned
-read does land somewhere else, the hub returns an **error instead of the
-payload** — being told in one line beats paying for a few thousand tokens of the
-wrong document. `browser_pin` with no `tabId` opts out for the session.
-
-## Files
-
-| Path | Role |
-|------|------|
-| `bridge/hub.ts` | the daemon: WebSocket server, pairing registry, every `browser_*` op |
-| `bridge/mcp.ts` | per-session MCP shim that forwards to the hub |
-| `bridge/security.ts` | token, extension binding, site lock, fetch and download limits, config |
-| `bridge/jev.ts` | optional semantic targeting: questions, thresholds, opt-in switch |
-| `bridge/db.ts` | `bun:sqlite` action log, filters, memos (`~/.browsteer/browsteer.db`) |
-| `bridge/cli.ts` | run any single op from a shell |
-| `extension/manifest.base.json` | manifest shared by both browsers; `scripts/build.ts` adds the per-browser keys |
-| `extension/src/ext.ts` | one name for the WebExtensions API in both browsers |
-| `extension/src/background.ts` | socket to the hub, key registration, relays ops to the tab (event page in Firefox, service worker in Chrome) |
-| `extension/src/policy.ts` | access rules: key generation, arming, site lists, read-only, the gate every request passes |
-| `extension/src/risk.ts` | which control names count as a commitment (shared with the hub) |
-| `extension/src/guard.ts` | the check before a click or key press activates a control |
-| `extension/src/site.ts` | what counts as one site (shared with the hub) |
-| `extension/src/content.ts` | actions (click/fill/read/press), element picker, message plumbing |
-| `extension/src/snapshot.ts` | snapshot core — pure DOM-in/string-out, unit-tested under happy-dom |
-| `extension/src/fallback.ts` | hit-test scan, coordinate clicks, keyboard-style typing |
-| `extension/src/dialogs.ts`, `dialogs-main.ts` | alert/confirm/prompt handling; the second file is Chrome's page-world half |
-| `extension/src/popup.ts`, `welcome.ts`, `keyview.ts` | popup and setup page |
-| `scripts/build.ts`, `package.ts`, `dev.ts` | build, package, dev loop |
-| `scripts/update.ts`, `updates-json.ts` | `bun run update`; the `updates.json` Firefox reads for new versions |
-| `bridge/version.ts` | the bridge version and the extension/bridge mismatch notes |
-| `scripts/check-manifest.ts` | CI check: the built manifests ask for exactly what is documented |
-| `.github/workflows/release.yml` | on a `v*` tag: test, build, submit to addons.mozilla.org with the source, publish the GitHub release ([docs/RELEASING.md](docs/RELEASING.md)) |
-| `.github/workflows/ci.yml` | typecheck, tests, build, manifest check, Firefox lint, package |
-| `skill/browse/SKILL.md` | the `/browse` slash command for Claude Code |
-
-## Tests
-
-```sh
-bun test                    # unit + integration tests, no browser needed
-bun run reduction           # before/after bytes+tokens for the reduction passes
-```
-
-`test/snapshot.test.ts` drives the snapshot core under happy-dom against
-`test/fixtures.ts` — structural replicas of a mobile.de detail page and results
-list, carrying the element counts observed in real use (31 gallery thumbs, a
-duplicated financing block, 12 map controls, 10 footer links). `test/hub.test.ts`
-exercises auto-pin and the drift refusal against a fake extension socket, so the
-targeting logic, the connection rules and the semantic-targeting default are
-covered without launching a browser.
-
-With a real browser:
-
-```sh
-bun run test/serve.ts &     # fixture page on :8080
-bun run test/mcp-client.ts  # spawns bridge, launches Firefox, snapshots + acts
-bun run test/measure.ts     # snapshot vs raw DOM on your CURRENT active tab
-```
-
-## Inspect the action log
-
-```sh
-sqlite3 ~/.browsteer/browsteer.db 'SELECT ts, tool, ref, ok, error FROM actions ORDER BY id DESC LIMIT 20;'
-```
+- [SECURITY.md](SECURITY.md): every limit, what it does not protect against,
+  and how to report a problem.
+- [PRIVACY.md](PRIVACY.md): what each part sees, keeps, and sends.
+- [docs/PERMISSIONS.md](docs/PERMISSIONS.md): each browser permission and why
+  the extension needs it.
+- [docs/DEVELOPING.md](docs/DEVELOPING.md): how the bridge and the snapshots
+  work, the source files, and the tests.
+- [BUILD.md](BUILD.md) and [docs/RELEASING.md](docs/RELEASING.md): how the
+  packages are built, signed, and published.
 
 ## License
 
-[MIT](LICENSE). Forks are welcome under the license. Please give a fork its own name, so users can tell it apart from Browsteer.
+[MIT](LICENSE). Forks are welcome under the license. Please give a fork its own
+name, so users can tell it apart from Browsteer.

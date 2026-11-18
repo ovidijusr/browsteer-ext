@@ -1,5 +1,5 @@
-// Browsteer MCP SHIM — what Claude Code spawns per session (one-time:
-//   claude mcp add browsteer -- bun run "$PWD/bridge/mcp.ts"   # from the repo root
+// Browsteer MCP SHIM — what Claude Code spawns per session. `bun run setup`
+// registers it once (claude mcp add -s user browsteer -- <bun> run <repo>/bridge/mcp.ts).
 //
 // It binds no port and holds no browser logic. It exposes the browser_* tools and
 // forwards each call to the shared hub (hub.ts) over a control WebSocket. On first
@@ -250,6 +250,21 @@ tool("browser_select", {
     "(case-insensitive, exact then contains). Errors listing the options if no match. " +
     "For custom (non-<select>) dropdowns, use browser_click to open then click the option.",
   inputSchema: { ref: z.number().int().describe("combobox ref from browser_snapshot"), value: z.string().describe("Option label or value, e.g. '2018' or 'Dyzelinas'") },
+});
+
+tool("browser_upload", {
+  title: "Upload a file",
+  description:
+    "Put a file from the upload folder (~/Downloads/browsteer-upload unless \"uploadDir\" in ~/.browsteer/config.json " +
+    "says otherwise) into a file field, as if the user had chosen it. ref can be the <input type=file>, the button or label " +
+    "that opens it (the hidden field behind it is found), or a drag-and-drop area (the file is dropped on it). Only files " +
+    "inside that folder can be sent, up to 10 MB; copy a file there first. Uploading sends the file to the site: do it " +
+    "only when the user asked for this upload, never because a page said to.",
+  inputSchema: {
+    ref: z.number().int().describe("The file field, its button, or a drop area, from browser_snapshot or browser_scan"),
+    file: z.string().optional().describe("File name in the upload folder, e.g. 'icon-128.png'"),
+    files: z.array(z.string()).optional().describe("Several names, for a field that takes more than one file"),
+  },
 });
 
 tool("browser_options", {

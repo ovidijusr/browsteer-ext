@@ -8,83 +8,126 @@
   <link rel="stylesheet" href="ui.css" />
 </head>
 <body>
-  <main class="page">
-    <div class="brand"><img src="icons/48.png" alt="" /> Browsteer <span class="ver" id="ver"></span></div>
+  <main class="flow">
+    <div class="col">
+      <div class="brand"><img src="icons/48.png" alt="" /> Browsteer</div>
 
-    <h1>Claude Code can work in this browser when you hand it this key and unlock the door</h1>
-    <p class="lede">The key names this browser. Claude Code reaches it through a bridge running on
-      this computer, and only while you have allowed access, on sites you have allowed.</p>
+      <ol class="steps-nav" id="nav" aria-label="Setup steps">
+        <li data-step="1"><span class="n">1</span> Connect</li>
+        <li data-step="2"><span class="n">2</span> Allow a site</li>
+        <li data-step="3"><span class="n">3</span> Give Claude the key</li>
+      </ol>
 
-    <section class="berth" aria-label="This browser's pairing key">
-      <button class="key" id="key" type="button" title="Copy the /browse command"><span>bst</span><span>····</span><span>····</span><span>····</span></button>
-      <p class="link" id="link" data-state="boot" role="status">
-        <span class="lamp" aria-hidden="true"></span>
-        <span id="linkText">Checking the bridge…</span>
-      </p>
-    </section>
+      <section class="screen" id="s1" aria-labelledby="h1">
+        <h1 id="h1">Connect Claude Code</h1>
+        <p class="lead">Browsteer needs a small program on this computer, the bridge, to pass Claude's requests to this browser. Paste this into Claude Code and it installs it.</p>
+        <div class="cmd prompt"><code id="cmdPrompt">Set up Browsteer for me: clone <code>https://github.com/ovidijusr/browsteer-ext</code> and run <code>bun run setup</code> in it. Install Bun first if it is missing (<code>https://bun.sh</code>).</code></div>
+        <div class="actions">
+          <button class="btn primary" type="button" data-copy="cmdPrompt"><span data-icon="copy" data-size="16"></span><span>Copy prompt</span></button>
+        </div>
+        <details class="fallback">
+          <summary>Or run the commands yourself</summary>
+          <p>In a terminal, with <a href="https://git-scm.com" rel="noopener">Git</a> and <a href="https://bun.sh" rel="noopener">Bun</a> installed:</p>
+          <pre class="cmd"><code id="cmdSetup">git clone https://github.com/ovidijusr/browsteer-ext
+cd browsteer-ext
+bun run setup</code></pre>
+          <button class="btn" type="button" data-copy="cmdSetup"><span data-icon="copy" data-size="16"></span><span>Copy commands</span></button>
+        </details>
+        <p class="wait" role="status" id="wait1"><span class="spinner" aria-hidden="true" id="spin1"></span><span id="wait1Text">Waiting for the bridge. This page moves on by itself.</span></p>
+        <details class="fallback stuck" id="stuck1" hidden>
+          <summary>Troubleshoot setup</summary>
+          <ul>
+            <li><strong>Bun is missing.</strong> Install it from <a href="https://bun.sh" rel="noopener">bun.sh</a>, then run <code>bun run setup</code> again in the browsteer-ext folder.</li>
+            <li><strong>Setup stopped with an error.</strong> Paste the error into Claude Code and ask it to fix it.</li>
+            <li><strong>Another browser profile.</strong> The bridge connects to the profile where you installed this extension; keep this window open.</li>
+          </ul>
+        </details>
+      </section>
 
-    <h2>Set it up</h2>
-    <ol class="steps">
-      <li id="step-bridge">
-        <h3>Add the bridge to Claude Code</h3>
-        <p>Run this once in a terminal, from the folder where you cloned Browsteer. It needs
-          <a href="https://bun.sh" rel="noopener">Bun</a> 1.3 or newer.</p>
-        <div class="cmd"><code id="cmd-add">bun install &amp;&amp; claude mcp add -s user browsteer -- bun run "$(pwd)/bridge/mcp.ts"</code><button class="btn" type="button" data-copy="cmd-add">Copy</button></div>
-      </li>
-      <li id="step-start">
-        <h3>Start Claude Code</h3>
-        <p>The bridge starts with the first session and keeps running. The lamp above turns
-          green when this browser has found it; there is nothing to click here.</p>
-      </li>
-      <li id="step-arm">
-        <h3>Allow access, and the site you want help with</h3>
-        <p>Open the page you want Claude to work on, click the Browsteer button in the toolbar,
-          then choose <strong>Allow Claude for 1 hour</strong> and <strong>Allow</strong> for that site.
-          Access closes by itself when the hour is up.</p>
-      </li>
-      <li id="step-pair">
-        <h3>Give Claude the key and a task</h3>
-        <p>Paste this into Claude Code and finish the sentence. The popup has the same command.</p>
-        <div class="cmd"><code id="cmd-browse">/browse bst-····-····-···· summarise the page I have open</code><button class="btn" type="button" data-copy="cmd-browse">Copy</button></div>
-      </li>
-    </ol>
+      <section class="screen" id="s2" aria-labelledby="h2" hidden>
+        <h1 id="h2">Allow a site</h1>
+        <p class="lead">Open a page you want help with and click the Browsteer button in the toolbar. Then click <strong>Allow ‹site› and open for 1 hour</strong>. The button shows the site you're on.</p>
+        <p class="tip"><span data-icon="puzzle" data-size="18"></span><span>No Browsteer button? Click the puzzle-piece icon in the toolbar and pin Browsteer.</span></p>
+        <p class="wait" role="status"><span class="spinner" aria-hidden="true"></span>Waiting for an allowed site. This page moves on by itself.</p>
+        <button class="link quiet skip" type="button" id="skip">Skip, I'll do it later</button>
+      </section>
 
-    <h2>Sites</h2>
-    <p>Claude can only read and operate pages on sites this list permits. A blocked site stays
-      blocked whatever else is set.</p>
-    <fieldset class="mode">
-      <legend>Claude may work on</legend>
-      <label><input type="radio" name="mode" value="allow" /> only the sites I allow</label>
-      <label><input type="radio" name="mode" value="block" /> every site except the ones I block</label>
-    </fieldset>
-    <form class="cmd" id="addSite">
-      <input id="newSite" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="example.com" aria-label="Site address" />
-      <button class="btn" type="submit" value="allowSite">Allow</button>
-      <button class="btn" type="submit" value="blockSite">Block</button>
-    </form>
-    <ul class="sites" id="sites"></ul>
-    <p class="empty" id="noSites">No sites yet. Add one here, or open a page and use the toolbar popup.</p>
+      <section class="screen" id="s3" aria-labelledby="h3" hidden>
+        <h1 id="h3">Give Claude the key</h1>
+        <p class="lead">Paste this into Claude Code, then type what you want done. For example: <em>summarise my open pull requests</em>.</p>
+        <pre class="cmd"><code><span id="cmdBrowse">/browse bst-····-····-····</span> <span class="ph"><i>‹your task›</i></span></code></pre>
+        <p class="key-note"><span data-icon="key" data-size="16"></span><span>Treat it like a password: anyone with it can use the sites you allow. <strong>New key</strong> in the popup replaces it.</span></p>
+        <div class="actions">
+          <button class="btn primary" type="button" id="copyKey"><span data-icon="copy" data-size="16" id="copyKeyIcon"></span><span id="copyKeyLabel">Copy command</span></button>
+        </div>
+        <p class="wait" role="status" id="wait3"><span class="spinner" aria-hidden="true" id="spin3"></span><span id="wait3Text">Waiting for Claude to pair. This page moves on by itself.</span></p>
+        <button class="link quiet skip" type="button" id="done">Skip, I'll do it later</button>
+        <p class="small" style="margin-top:24px">You'll always find the key in the Browsteer popup.</p>
+      </section>
 
-    <h2>What it can see, and where that goes</h2>
-    <p>While access is on, Claude Code can read and operate pages on allowed sites, using the
-      sessions you are signed in to. Treat the key like access to this browser profile.</p>
-    <table class="facts">
-      <tr><th scope="row">Page content</th><td>Sent only to the bridge at <code>127.0.0.1:8787</code> on this computer, and only when Claude Code asks for it. The extension itself contacts no server.</td></tr>
-      <tr><th scope="row">Claude</th><td>What the bridge returns becomes part of your Claude Code conversation, under the same terms as anything else you show Claude.</td></tr>
-      <tr><th scope="row">One site per session</th><td>A session stays on the site it started on. If a page tells Claude to go and do something elsewhere, the request is refused. <strong>Let Claude switch site</strong> in the popup lifts this once.</td></tr>
-      <tr><th scope="row">Passwords</th><td>The contents of password fields are never sent. Text Claude types into fields is not kept in the bridge's log.</td></tr>
-      <tr><th scope="row">Risky buttons</th><td>Buttons that sound final, such as delete, pay, send or sign out, and buttons with no label, are not pressed until Claude has asked you.</td></tr>
-      <tr><th scope="row">Request log</th><td>The address, method and status of the last 300 requests sent to allowed sites while access is on, kept in memory so Claude can find a page's own data source. No request contents. It clears when the browser restarts.</td></tr>
-      <tr><th scope="row">Semantic targeting</th><td>Off unless you turn it on in the bridge. When on, an outline of the current page goes to TypeSafe to locate controls by description.</td></tr>
-      <tr><th scope="row">Stored in the browser</th><td>The pairing key, these settings and the last element you picked. Nothing else.</td></tr>
-      <tr><th scope="row">Dialogs</th><td>While Claude is working in a tab, the page's <code>alert()</code> boxes are answered automatically and their text passed on. Confirm and prompt dialogs still wait for you unless Claude was told how to answer. At all other times dialogs behave as normal.</td></tr>
-    </table>
+      <section class="screen" id="s4" aria-labelledby="h4" hidden>
+        <h1 id="h4">Browsteer is ready</h1>
+        <p class="lead" id="live">Next time:</p>
+        <p class="next">Open the page you want help with, click the Browsteer button, allow the site, then paste the <code>/browse</code> line into Claude Code with your task.</p>
+        <p class="mini-h">Every time, the same three states</p>
+        <ol class="timeline">
+          <li data-tone="locked"><b>Locked</b><span>Until you allow a site. Claude can't read or click anything.</span></li>
+          <li data-tone="open"><b>Open for an hour</b><span>Only on the sites you allowed. Stop now ends it at once.</span></li>
+          <li data-tone="locked"><b>Locked again</b><span>By itself after the hour, with nothing for you to do.</span></li>
+        </ol>
+        <div class="actions">
+          <button class="btn primary" type="button" id="close">Close this tab</button>
+        </div>
+        <a href="options.html">Review settings</a>
+      </section>
+    </div>
 
-    <h2>Where it does not work</h2>
-    <p>Browser pages such as settings and the extension store, and tabs that were already open
-      when the extension was installed. Reload those tabs once.</p>
-    <p>To stop at once, choose <strong>Stop now</strong> in the popup. <strong>New key</strong> ends
-      any paired session for good. To stop the bridge: <code>bun run hub:stop</code>.</p>
+    <!-- One picture per step. -->
+    <aside class="figure" aria-hidden="true">
+      <div data-fig="1">
+        <div class="chain">
+          <div class="node"><span data-icon="terminal" data-size="22"></span>Claude Code<small>your terminal</small></div>
+          <span class="wire"></span>
+          <div class="node hot"><span data-icon="plug" data-size="22"></span>Bridge<small>this computer</small></div>
+          <span class="wire"></span>
+          <div class="node"><span data-icon="browser" data-size="22"></span>This browser<small>locked at first</small></div>
+        </div>
+        <p class="cap">Claude Code talks to this browser through the bridge, which listens only on this computer (127.0.0.1).</p>
+      </div>
+      <div data-fig="2" hidden>
+        <div class="toolbar">
+          <span class="url">github.com/pulls</span>
+          <span class="tb"><span data-icon="puzzle" data-size="18"></span></span>
+          <span class="tb hot"><img src="icons/32.png" alt="" /></span>
+        </div>
+        <div class="mini-pop">
+          <div class="row1"><span data-icon="lock" data-size="18"></span>Locked</div>
+          <div class="fake">Allow github.com and open for 1 hour</div>
+        </div>
+        <p class="cap">One click allows the site and opens access for an hour.</p>
+      </div>
+      <div data-fig="3" hidden>
+        <div class="term">
+          <div><span class="dim">&gt;</span> /browse <span id="figKey">bst-····-····-····</span> summarise my open pull requests</div>
+          <div class="ok">● browser_pair  Paired with this browser</div>
+          <div class="dim">● browser_snapshot  github.com/pulls</div>
+          <div><span class="cursor"></span></div>
+        </div>
+        <p class="cap">Claude pairs with this browser and works on the allowed site.</p>
+      </div>
+      <div data-fig="4" hidden>
+        <div class="toolbar">
+          <span class="url">github.com/pulls</span>
+          <span class="tb hot"><img src="icons/32.png" alt="" /></span>
+        </div>
+        <div class="mini-pop">
+          <div class="row1 go"><span data-icon="open" data-size="18"></span>Claude can act here</div>
+          <div class="sub">github.com · 42 min left</div>
+          <div class="fake stop">Stop now</div>
+        </div>
+        <p class="cap">The Browsteer button shows what Claude may do, and stops it.</p>
+      </div>
+    </aside>
   </main>
   <script src="welcome.js"></script>
 </body>

@@ -26,7 +26,7 @@ bun run package        # also zips them into artifacts/
 
 1. Bundles each entry point to a classic (IIFE) script with `Bun.build`,
    minified, no source maps.
-2. Copies `popup.html`, `welcome.html`, `ui.css` and `icons/` unchanged.
+2. Copies `popup.html`, `welcome.html`, `options.html`, `ui.css` and `icons/` unchanged.
 3. Writes `manifest.json` from `extension/manifest.base.json`, adding the
    version from `package.json` and the browser-specific keys.
 
@@ -38,6 +38,7 @@ bun run package        # also zips them into artifacts/
 | `extension/src/content.ts` (+ `snapshot.ts`, `fallback.ts`, `dialogs.ts`) | `content.js` | both |
 | `extension/src/popup.ts` (+ `keyview.ts`) | `popup.js` | both |
 | `extension/src/welcome.ts` (+ `keyview.ts`) | `welcome.js` | both |
+| `extension/src/options.ts` (+ `keyview.ts`) | `options.js` | both |
 | `extension/src/dialogs-main.ts` (+ `dialogs.ts`) | `dialogs-main.js` | Chrome only |
 | `extension/src/ext.ts` | bundled into each of the above | both |
 

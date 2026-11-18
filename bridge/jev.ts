@@ -9,8 +9,9 @@
 // thresholds, and the state trimming. Nothing here touches the browser; hub.ts
 // owns snapshot/click and calls into these functions.
 import { TypeSafeClient, choice, noul } from "@typesafe-ai/sdk";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { loadConfig } from "./security";
 
 // ── Thresholds (tune against ~/.browsteer/browsteer.db actions.detail) ───────
@@ -89,13 +90,18 @@ export async function warm(): Promise<void> {
 // Asking Jev sends an outline of the current page (control names + visible text)
 // to api.typesafe.ai. That is off unless the person running the hub turned it
 // on: BROWSTEER_JEV=1 in the hub's environment, or {"jev": true} in
-// ~/.browsteer/config.json. Off, find answers from the page alone (memos +
+// ~/.browsteer/config.json, which the popup's switch and `bun run setup` write. Off, find answers from the page alone (memos +
 // exact names) and pursue is unavailable; nothing leaves the machine.
-export const JEV_OFF = 'Semantic targeting is off, so no page content is sent to TypeSafe. Turn it on with {"jev": true} in ~/.browsteer/config.json (see PRIVACY.md), or use browser_snapshot and act on refs.';
+export const JEV_OFF = 'Semantic targeting is off, so no page content is sent to TypeSafe. The user can turn it on in the Browsteer Settings page (or {"jev": true} in ~/.browsteer/config.json, see PRIVACY.md). Meanwhile use browser_snapshot and act on refs.';
 export function jevEnabled(): boolean {
   const env = process.env.BROWSTEER_JEV;
   if (env != null) return env === "1" || env === "true";
   return loadConfig().jev;
+}
+
+/** What the extension may show about semantic targeting: on or off, and whether a key exists. Never the key. */
+export function jevState(): { on: boolean; keyPresent: boolean; envOverride: boolean } {
+  return { on: jevEnabled(), keyPresent: loadApiKey() !== null, envOverride: process.env.BROWSTEER_JEV != null };
 }
 
 export const MAX_STATE_CHARS = 60_000; // ≈15k tokens; Jev's state budget is 32k tokens
@@ -105,18 +111,38 @@ export const SHORTLIST_PER_BATCH = 3;  // survivors per batch when >255 candidat
 // ── Key + client ─────────────────────────────────────────────────────────────
 // The hub is spawned detached from a Claude session, so the env rarely carries
 // the key. Fall back to the same file the `jev` skill and jev-sample use.
+/** Where `bun run setup` writes the key, and where the hub looks when the environment has none. */
+export const TYPESAFE_ENV_FILE = process.env.TYPESAFE_ENV_FILE || join(homedir(), ".config", "typesafe", "env");
 export function loadApiKey(): string | null {
   if (process.env.TYPESAFE_API_KEY) return process.env.TYPESAFE_API_KEY;
-  const file = `${homedir()}/.config/typesafe/env`;
-  if (!existsSync(file)) return null;
-  const m = readFileSync(file, "utf8").match(/^\s*TYPESAFE_API_KEY=(.+)$/m);
-  return m ? m[1].trim() : null;
+  if (!existsSync(TYPESAFE_ENV_FILE)) return null;
+  const m = readFileSync(TYPESAFE_ENV_FILE, "utf8").match(/^\s*TYPESAFE_API_KEY=(.+)$/m);
+  return m && m[1].trim() ? m[1].trim() : null;
+}
+/** Write TYPESAFE_API_KEY into the env file (bun run setup), keeping its other lines. Readable by this user only. */
+export function saveApiKey(key: string, file = TYPESAFE_ENV_FILE): void {
+  if (!key || /\s/.test(key)) throw new Error("An API key has no spaces or line breaks.");
+  let lines: string[] = [];
+  try { lines = readFileSync(file, "utf8").split(/\r?\n/).filter((l) => l && !/^\s*TYPESAFE_API_KEY=/.test(l)); } catch {}
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(file, [...lines, `TYPESAFE_API_KEY=${key}`].join("\n") + "\n", { mode: 0o600 });
+  try { chmodSync(file, 0o600); } catch {} // the mode above only applies to a new file
+}
+
+/** Remove TYPESAFE_API_KEY from the env file, keeping its other lines. */
+export function removeApiKey(file = TYPESAFE_ENV_FILE): void {
+  let lines: string[];
+  try { lines = readFileSync(file, "utf8").split(/\r?\n/).filter((l) => l && !/^\s*TYPESAFE_API_KEY=/.test(l)); } catch { return; }
+  writeFileSync(file, lines.length ? lines.join("\n") + "\n" : "", { mode: 0o600 });
 }
 
 let _client: TypeSafeClient | null = null;
+/** Forget the cached client, so the next call reads the key again (after the Settings page saved a new one). */
+export function resetClient(): void { _client = null; }
 export function client(): TypeSafeClient {
-  if (_client) return _client;
+  // Checked before the cached client: the switch can now be turned off while the hub runs.
   if (!jevEnabled()) throw new Error(JEV_OFF);
+  if (_client) return _client;
   const apiKey = loadApiKey();
   if (!apiKey) throw new Error("Jev unavailable: no TYPESAFE_API_KEY in env or ~/.config/typesafe/env (see the `jev` skill).");
   // Pinned: thresholds above were tuned on this version. Override with TYPESAFE_DEFAULT_MODEL.

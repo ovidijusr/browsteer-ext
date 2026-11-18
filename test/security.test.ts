@@ -1,7 +1,9 @@
 // Pure-function tests for the hub's security rules:  bun test test/security.test.ts
 import { describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
-import { classifyOrigin, extensionAllowed, resolveSavePath, sameSite, siteOf, tokenMatches } from "../bridge/security";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { classifyOrigin, extensionAllowed, resolveSavePath, resolveUploadFile, sameSite, siteOf, tokenMatches } from "../bridge/security";
 
 describe("origins", () => {
   test("web pages are refused, extensions and local programs are told apart", () => {
@@ -60,6 +62,42 @@ describe("download folder", () => {
     expect("error" in resolveSavePath("/etc/hosts", dir)).toBe(true);
     expect("error" in resolveSavePath(`${dir}/../other/x`, dir)).toBe(true);
     expect("error" in resolveSavePath(dir, dir)).toBe(true);
+  });
+});
+
+describe("upload folder", () => {
+  const root = mkdtempSync(join(tmpdir(), "browsteer-up-"));
+  const dir = join(root, "upload");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "icon.png"), "png");
+  writeFileSync(join(root, "secret.txt"), "secret");
+  mkdirSync(join(dir, "sub"));
+
+  test("a file in the folder is found by name, with its type", () => {
+    const r = resolveUploadFile("icon.png", dir) as any;
+    expect(r.name).toBe("icon.png");
+    expect(r.size).toBe(3);
+    expect(r.type).toBe("image/png");
+  });
+  test("paths out of the folder are refused", () => {
+    expect("error" in resolveUploadFile("../secret.txt", dir)).toBe(true);
+    expect("error" in resolveUploadFile(join(root, "secret.txt"), dir)).toBe(true);
+    expect("error" in resolveUploadFile("~/.ssh/id_ed25519", dir)).toBe(true);
+  });
+  test("a link inside the folder that points out of it is refused", () => {
+    let linked = true;
+    try { symlinkSync(join(root, "secret.txt"), join(dir, "link.txt")); } catch { linked = false; } // Windows needs a privilege for links
+    if (linked) expect((resolveUploadFile("link.txt", dir) as any).error).toContain("only be uploaded from");
+  });
+  test("folders, missing files and big files are refused", () => {
+    expect("error" in resolveUploadFile("sub", dir)).toBe(true);
+    expect("error" in resolveUploadFile("nope.png", dir)).toBe(true);
+    expect((resolveUploadFile("icon.png", dir, 2) as any).error).toContain("limit");
+  });
+  test("a missing folder is created, and nothing is sent", () => {
+    const fresh = join(root, "not-yet");
+    expect((resolveUploadFile("a.png", fresh) as any).error).toContain("exists now");
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

@@ -18,15 +18,29 @@ export function genKey(random: (n: number) => Uint8Array = (n) => crypto.getRand
 export interface Settings {
   /** Epoch ms until which Claude may work in this browser. 0 = locked. */
   armedUntil: number;
+  /** Allow means "until Stop" instead of an hour. Off by default; the Settings page marks it dangerous. */
+  alwaysOn: boolean;
   /** Look, don't touch: reads only. */
   readOnly: boolean;
-  /** "allow": only the listed sites. "block": every site except the listed ones. */
+  /** "allow": only the listed sites. "block": every site except the listed ones (marked dangerous). */
   siteMode: "allow" | "block";
   allow: string[];
   block: string[];
 }
-export const DEFAULT_SETTINGS: Settings = { armedUntil: 0, readOnly: false, siteMode: "allow", allow: [], block: [] };
+export const DEFAULT_SETTINGS: Settings = { armedUntil: 0, alwaysOn: false, readOnly: false, siteMode: "allow", allow: [], block: [] };
 export const ARM_MINUTES = 60;
+/** armedUntil for "always on": the largest time a Date can hold. */
+export const FOREVER = 8_640_000_000_000_000;
+
+/** When access chosen now should close: in an hour, or never in "always on". */
+export function armUntil(s: Settings, now = Date.now()): number {
+  return s.alwaysOn ? FOREVER : now + ARM_MINUTES * 60_000;
+}
+/** Switching "always on" keeps the current open/locked state; turning it off caps what is left at an hour. */
+export function alwaysOnPatch(s: Settings, on: boolean, now = Date.now()): Partial<Settings> {
+  if (!isArmed(s, now)) return { alwaysOn: on };
+  return { alwaysOn: on, armedUntil: on ? FOREVER : Math.min(s.armedUntil, now + ARM_MINUTES * 60_000) };
+}
 
 export function isArmed(s: Settings, now = Date.now()): boolean {
   return s.armedUntil > now;
@@ -63,7 +77,7 @@ export function isWrite(op: string, params: any): boolean {
 // through the bridge — only from the popup.
 export function refusal(s: Settings, op: string, params: any, host: string | null, now = Date.now()): string | null {
   if (!isArmed(s, now))
-    return "Browsteer is locked in this browser. Ask the user to open the Browsteer popup and choose “Allow Claude for 1 hour”.";
+    return "Browsteer is locked in this browser. Ask the user to open the page, click the Browsteer button and choose “Allow Claude on …” for that site.";
   if (s.readOnly && isWrite(op, params))
     return `This browser is in read-only mode, so '${op}' is refused. Reading (snapshot, read, links, form) still works. The user can turn off “Read only” in the Browsteer popup.`;
   if (op === "tabs" || op === "requests") return null; // filtered per entry instead
@@ -71,7 +85,7 @@ export function refusal(s: Settings, op: string, params: any, host: string | nul
     if (!host) return "This address is not a web page Browsteer can work on.";
     return s.block.some((e) => covers(e, host))
       ? `${host} is on the user's blocked list. Browsteer will not read or operate it.`
-      : `${host} is not on the user's allowed list. Ask the user to open that page, then choose “Allow ${host}” in the Browsteer popup.`;
+      : `${host} is not on the user's allowed list. Ask the user to open that page, then choose “Allow Claude on ${host}” in the Browsteer popup.`;
   }
   return null;
 }

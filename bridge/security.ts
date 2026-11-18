@@ -1,10 +1,10 @@
 // Hub security: who may connect, and what a connected session may reach.
 // Pure helpers plus the small amount of state kept under ~/.browsteer. hub.ts
 // decides when to call them; nothing here talks to the browser.
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { basename, extname, join, resolve, sep } from "node:path";
 
 export const DATA_DIR = process.env.BROWSTEER_DB_DIR || join(homedir(), ".browsteer");
 
@@ -24,12 +24,14 @@ export interface Config {
   fetchAnySite: boolean;
   /** The only folder browser_fetch({saveTo}) may write into. */
   downloadDir: string;
+  /** The only folder browser_upload may read from. */
+  uploadDir: string;
   /** Days of action log to keep. */
   logDays: number;
 }
 const DEFAULTS: Config = {
   jev: false, extensions: [], siteLock: true, fetchWrite: false, fetchAnySite: false,
-  downloadDir: join(homedir(), "Downloads", "browsteer"), logDays: 30,
+  downloadDir: join(homedir(), "Downloads", "browsteer"), uploadDir: join(homedir(), "Downloads", "browsteer-upload"), logDays: 30,
 };
 const CONFIG_PATH = join(DATA_DIR, "config.json");
 
@@ -40,6 +42,7 @@ export function loadConfig(): Config {
   for (const k of ["jev", "siteLock", "fetchWrite", "fetchAnySite"] as const) if (typeof raw[k] === "boolean") c[k] = raw[k];
   if (Array.isArray(raw.extensions)) c.extensions = raw.extensions.filter((x: unknown) => typeof x === "string");
   if (typeof raw.downloadDir === "string" && raw.downloadDir) c.downloadDir = expandHome(raw.downloadDir);
+  if (typeof raw.uploadDir === "string" && raw.uploadDir) c.uploadDir = expandHome(raw.uploadDir);
   if (Number.isFinite(raw.logDays) && raw.logDays > 0) c.logDays = raw.logDays;
   return c;
 }
@@ -121,6 +124,42 @@ export function resolveSavePath(saveTo: string, downloadDir: string): { path: st
   const path = resolve(dir, wanted);
   if (path !== dir && path.startsWith(dir + sep)) return { path };
   return { error: `saveTo must be inside ${dir} (give a file name, or a path under that folder). Change "downloadDir" in ~/.browsteer/config.json to use another folder.` };
+}
+
+// ── Uploads ──────────────────────────────────────────────────────────────────
+// browser_upload is the one tool that sends a file from this computer to a page,
+// so it reads from one folder only: the person (or Claude, through its own tools
+// and their permission prompts) has to put a file there first.
+export const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+const MIME: Record<string, string> = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+  ".svg": "image/svg+xml", ".ico": "image/x-icon", ".pdf": "application/pdf", ".txt": "text/plain", ".csv": "text/csv",
+  ".json": "application/json", ".md": "text/markdown", ".html": "text/html", ".zip": "application/zip",
+  ".xpi": "application/x-xpinstall", ".doc": "application/msword", ".mp4": "video/mp4", ".mp3": "audio/mpeg",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
+export const mimeOf = (name: string) => MIME[extname(name).toLowerCase()] ?? "application/octet-stream";
+
+/**
+ * A file browser_upload may send: inside the upload folder after following links,
+ * a regular file, and within the size limit. Bare names are looked up in the folder.
+ */
+export function resolveUploadFile(name: string, uploadDir: string, maxBytes = UPLOAD_MAX_BYTES):
+  { path: string; name: string; size: number; type: string } | { error: string } {
+  const dir = resolve(uploadDir);
+  const outside = `Files can only be uploaded from ${dir}. Copy the file there first, then pass its name. Change "uploadDir" in ~/.browsteer/config.json to use another folder.`;
+  const path = resolve(dir, expandHome(name));
+  if (path === dir || !path.startsWith(dir + sep)) return { error: outside };
+  let real: string, realDir: string;
+  try { realDir = realpathSync(dir); } catch { try { mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch {} return { error: `The upload folder ${dir} was empty; it exists now. Put the file there, then try again.` }; }
+  try { real = realpathSync(path); } catch { return { error: `No file named ${JSON.stringify(name)} in ${dir}.` }; }
+  // A link inside the folder that points elsewhere is still outside.
+  if (!real.startsWith(realDir + sep)) return { error: outside };
+  const st = statSync(real);
+  if (!st.isFile()) return { error: `${JSON.stringify(name)} is not a file.` };
+  if (st.size > maxBytes) return { error: `${basename(real)} is ${(st.size / 1048576).toFixed(1)} MB; the limit is ${maxBytes / 1048576} MB.` };
+  return { path: real, name: basename(real), size: st.size, type: mimeOf(real) };
 }
 
 /** What was typed into a field never goes into the action log — it may be a password. */

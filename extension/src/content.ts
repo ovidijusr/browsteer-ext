@@ -37,7 +37,7 @@ const working = (() => {
     bar = document.createElement("div");
     bar.style.cssText = "display:none;height:3px;background:#2447e0;box-shadow:0 0 0 1px rgba(255,255,255,.7)";
     const tag = document.createElement("div");
-    tag.textContent = "Claude is working in this tab";
+    tag.textContent = "Claude is working";
     tag.style.cssText = "position:absolute;top:3px;right:12px;padding:3px 9px 4px;border-radius:0 0 7px 7px;background:#2447e0;color:#fff;font:600 11px/1.3 system-ui,sans-serif";
     bar.append(tag);
     root.append(bar);
@@ -114,6 +114,53 @@ function doFill(ref: number, value: string) {
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
   return { url: location.href };
+}
+
+// ── Upload ───────────────────────────────────────────────────────────────────
+// The bridge sends the bytes (from its upload folder only); this puts them in the
+// page's file field, or drops them on a drop area, as if the person had chosen them.
+function doUpload(ref: number, files: { name: string; type: string; b64: string }[]) {
+  const el = resolve(ref) as Element;
+  const dt = new DataTransfer();
+  for (const f of files) {
+    const bin = atob(f.b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    dt.items.add(new File([bytes], f.name, { type: f.type, lastModified: Date.now() }));
+  }
+  const input = fileInputFor(el);
+  if (input) {
+    if (files.length > 1 && !input.multiple) throw new Error(`[${ref}] takes one file; pass one.`);
+    input.files = dt.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return { url: location.href, how: input === el ? "file field" : "the file field behind it" };
+  }
+  // No file field: treat the element as a drop area.
+  const r = el.getBoundingClientRect();
+  const at = { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+  for (const type of ["dragenter", "dragover", "drop"]) {
+    el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, composed: true, dataTransfer: dt, ...at }));
+  }
+  return { url: location.href, how: "dropped on it" };
+}
+
+/** The <input type=file> an element stands for: itself, its label's, one inside it, or one in its form row. */
+function fileInputFor(el: Element): HTMLInputElement | null {
+  const isFile = (n: Element | null | undefined): n is HTMLInputElement => n instanceof HTMLInputElement && n.type === "file";
+  if (isFile(el)) return el;
+  if (el instanceof HTMLLabelElement && isFile(el.control)) return el.control;
+  const label = el.closest("label");
+  if (label && isFile(label.control)) return label.control;
+  const inside = el.querySelector("input[type=file]") ?? el.shadowRoot?.querySelector("input[type=file]");
+  if (isFile(inside)) return inside;
+  // A styled button next to a hidden field: look one and two levels up, if exactly one field is there.
+  for (let up = el.parentElement, i = 0; up && i < 2; up = up.parentElement, i++) {
+    const near = up.querySelectorAll("input[type=file]");
+    if (near.length === 1) return near[0] as HTMLInputElement;
+    if (near.length > 1) break;
+  }
+  return null;
 }
 
 function doSelect(ref: number, value: string) {
@@ -362,6 +409,7 @@ function handleOp(op: string, params: any): unknown {
     case "pulse": return pulse();
     case "fill": return doFill(params.ref, params.value);
     case "select": return doSelect(params.ref, params.value);
+    case "upload": return doUpload(params.ref, params.files);
     case "options": return doOptions(params.ref);
     case "read": return doRead(params.ref);
     case "html": return doHtml(params.ref, params.clean ?? true, params.up ?? 0, params.offset ?? 0, params.maxBytes ?? 50_000);
