@@ -590,3 +590,66 @@ describe("semantic targeting switch", () => {
     expect(file).toContain("OTHER=1");
   });
 });
+
+// One session, several browsers (say Edge and Firefox): pair with each key, then
+// name the browser per call. The default is the last one paired.
+describe("several browsers", () => {
+  const KEY2 = "bst-ffff-gggg-hhhh";
+  const ops2: string[] = [];
+  let ext2: WebSocket;
+
+  test("a second browser registers and pairs; the reply names both", async () => {
+    ext.send(JSON.stringify({ type: "register", key: KEY, browser: "edge" }));
+    ext2 = asExtension();
+    await waitOpen(ext2);
+    ext2.onmessage = (ev) => {
+      const req = JSON.parse(String(ev.data));
+      if (req.type) return;
+      ops2.push(req.op);
+      ext2.send(JSON.stringify({ id: req.id, ok: true, result: { ...snapResult("https://a.example/two", 99), tabId: 99 } }));
+    };
+    ext2.send(JSON.stringify({ type: "register", key: KEY2, browser: "firefox" }));
+    await Bun.sleep(100);
+    const r = await ask("pair", { key: KEY2 });
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain("firefox");
+    expect(r.text).toContain("2 browsers");
+  });
+
+  test("the last paired browser is the default; browser: picks another for one call", async () => {
+    canned.snapshot = snapResult("https://a.example/one", 42);
+    seenOps.length = 0; ops2.length = 0;
+    const onEdge = await ask("snapshot", { browser: "edge" });
+    expect(onEdge.text.startsWith("[edge")).toBe(true);
+    expect(seenOps.some((o) => o.op === "snapshot")).toBe(true);
+    expect(ops2).toEqual([]);
+    const byDefault = await ask("snapshot", {});
+    expect(ops2).toContain("snapshot");
+    expect(byDefault.text.startsWith("[")).toBe(false);
+  });
+
+  test("each browser keeps its own pinned tab", async () => {
+    await ask("pin", { browser: "edge", tabId: 42 });
+    await ask("pin", { tabId: 99 }); // the default browser, firefox
+    seenOps.length = 0; ops2.length = 0;
+    await ask("snapshot", { browser: "edge" });
+    await ask("snapshot", {});
+    expect(seenOps.find((o) => o.op === "snapshot")!.params.tabId).toBe(42);
+  });
+
+  test("an unknown name lists the paired browsers, never other keys", async () => {
+    const r = await ask("snapshot", { browser: "safari" });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("edge");
+    expect(r.text).toContain("firefox");
+  });
+
+  test("calls in parallel on two browsers each reach their own", async () => {
+    seenOps.length = 0; ops2.length = 0;
+    const [a, b] = await Promise.all([ask("snapshot", { browser: "edge" }), ask("snapshot", { browser: "firefox" })]);
+    expect(a.text.startsWith("[edge")).toBe(true);
+    expect(b.text.startsWith("[firefox")).toBe(true);
+    expect(seenOps.filter((o) => o.op === "snapshot").length).toBe(1);
+    expect(ops2.filter((o) => o === "snapshot").length).toBe(1);
+  });
+});

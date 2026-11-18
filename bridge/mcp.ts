@@ -117,8 +117,11 @@ async function forward(op: string, args: Record<string, unknown>): Promise<{ ok:
 }
 
 const mcp = new McpServer({ name: "browsteer", version: VERSION });
+// With several paired browsers, any tool can run on one of them for that call.
+const BROWSER_ARG = z.string().optional().describe("Run this call on another paired browser: its name ('edge', 'firefox', 'chrome', 'brave') or its key. Omit to use the default (the last one paired).");
 function tool(name: string, config: any) {
   const op = name.replace(/^browser_/, "");
+  if (name !== "browser_pair") config = { ...config, inputSchema: { ...(config.inputSchema ?? {}), browser: BROWSER_ARG } };
   mcp.registerTool(name, config, async (args: any) => {
     const r = await forward(op, args ?? {});
     return { isError: !r.ok, content: [{ type: "text", text: r.text }] };
@@ -127,7 +130,7 @@ function tool(name: string, config: any) {
 
 tool("browser_pair", {
   title: "Pair with a browser",
-  description: "Select which connected browser to drive, by its pairing key (shown in the Browsteer extension popup, e.g. 'bst-ab12-cd34'). Call this first.",
+  description: "Select which connected browser to drive, by its pairing key (shown in the Browsteer extension popup, e.g. 'bst-ab12-cd34'). Call this first. To work in several browsers at once (say Edge and Firefox, to check a page in each), call it once per key: the last one paired is the default, and any other tool takes browser:'edge' (a name or a key) to run on another.",
   inputSchema: { key: z.string().describe("Pairing key from the extension popup") },
 });
 

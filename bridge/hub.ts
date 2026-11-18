@@ -26,8 +26,12 @@ const WS_PORT = Number(process.env.BRIDGE_PORT ?? 8787);
 const CALL_TIMEOUT_MS = 15_000;
 
 // Per-controller (per Claude session) state — pairings/pins don't leak across sessions.
+/** What a session remembers about one browser: its tab, and what it last saw there. Tab ids differ per browser. */
+interface TabState { pinnedTabId: number | null; lastUrl: string | null; autoPinned: boolean; noAutoPin: boolean; lastOpMayNavigate: boolean }
 interface Controller {
   activeKey: string | null;
+  /** Every browser this session paired with (key → its tab state while another one is active). */
+  paired: Map<string, TabState | null>;
   pinnedTabId: number | null;
   lastUrl: string | null;
   autoPinned: boolean;      // we pinned it, the caller didn't
@@ -35,7 +39,7 @@ interface Controller {
   lastOpMayNavigate: boolean; // the previous op could legitimately change the URL
   site: string | null;      // the site this session started on; it stays there (see siteCheck)
 }
-type SockData = { role: "extension" | "control" | null; key: string | null; ctl: Controller | null; peer: Peer; origin: string | null; extVersion: string | null };
+type SockData = { role: "extension" | "control" | null; key: string | null; ctl: Controller | null; peer: Peer; origin: string | null; extVersion: string | null; browserName: string | null };
 type Sock = ServerWebSocket<SockData>;
 
 const browsers = new Map<string, Sock>(); // key → extension socket
@@ -48,7 +52,32 @@ let seq = 0;
 const dialogNotes: string[] = [];
 
 function newController(): Controller {
-  return { activeKey: null, pinnedTabId: null, lastUrl: null, autoPinned: false, noAutoPin: false, lastOpMayNavigate: false, site: null };
+  return { activeKey: null, paired: new Map(), pinnedTabId: null, lastUrl: null, autoPinned: false, noAutoPin: false, lastOpMayNavigate: false, site: null };
+}
+
+// ── Several browsers in one session ──────────────────────────────────────────
+// A session can pair with more than one browser (say Edge and Firefox) to check the
+// same page in each. One is active at a time; the tab state of the others is kept
+// aside. The site lock is shared: every browser in the session stays on one site.
+const freshTab = (): TabState => ({ pinnedTabId: null, lastUrl: null, autoPinned: false, noAutoPin: false, lastOpMayNavigate: false });
+function switchTo(ctl: Controller, key: string): void {
+  if (ctl.activeKey === key) return;
+  if (ctl.activeKey) ctl.paired.set(ctl.activeKey, { pinnedTabId: ctl.pinnedTabId, lastUrl: ctl.lastUrl, autoPinned: ctl.autoPinned, noAutoPin: ctl.noAutoPin, lastOpMayNavigate: ctl.lastOpMayNavigate });
+  Object.assign(ctl, ctl.paired.get(key) ?? freshTab());
+  ctl.paired.set(key, null);
+  ctl.activeKey = key;
+}
+const browserLabel = (key: string) => `${browsers.get(key)?.data.browserName ?? "browser"} (${key})`;
+/** A paired browser by its key or its name ("edge", "firefox"); only browsers this session paired with. */
+function resolveBrowser(ctl: Controller, name: string): string {
+  if (ctl.paired.has(name)) return name;
+  const want = name.trim().toLowerCase();
+  const hits = [...ctl.paired.keys()].filter((k) => browsers.get(k)?.data.browserName === want);
+  if (hits.length === 1) return hits[0];
+  const list = [...ctl.paired.keys()].map(browserLabel).join(", ") || "none";
+  throw new Error(hits.length > 1
+    ? `Two paired browsers are '${want}'. Pass the key instead: ${list}.`
+    : `No paired browser '${name}'. Paired in this session: ${list}. Pair another with browser_pair({ key }).`);
 }
 
 // Ops that can legitimately change the URL — drift after one of these is expected.
@@ -214,7 +243,31 @@ const fail = (text: string): Res => ({ text, isError: true });
 
 // The op bodies — identical behavior to the old per-tool MCP handlers, but with
 // per-controller state and returning {text,isError} instead of MCP content.
+/** Run one op, on another paired browser for this call only when it names one (browser: "firefox" or a key). */
+// With more than one browser in a session, its calls run one at a time: a call on
+// another browser swaps the session's tab state, and a parallel call must not see that.
+const queues = new WeakMap<Controller, Promise<unknown>>();
 async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
+  if (ctl.paired.size < 2) return execRouted(ctl, op, p);
+  const prev = queues.get(ctl) ?? Promise.resolve();
+  const run = prev.then(() => execRouted(ctl, op, p), () => execRouted(ctl, op, p));
+  queues.set(ctl, run.catch(() => {}));
+  return run;
+}
+
+async function execRouted(ctl: Controller, op: string, p: any): Promise<Res> {
+  if (op === "pair" || p?.browser == null || p.browser === "") return execOne(ctl, op, p);
+  let key: string;
+  try { key = resolveBrowser(ctl, String(p.browser)); } catch (e: any) { return fail(e.message); }
+  const back = ctl.activeKey;
+  switchTo(ctl, key);
+  try {
+    const r = await execOne(ctl, op, p);
+    return { ...r, text: `[${browserLabel(key)}]\n${r.text}` };
+  } finally { if (back && back !== key) switchTo(ctl, back); }
+}
+
+async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
   // Read the previous op's intent before overwriting it — drift is only
   // suspicious when the op *before* this one couldn't have caused it.
   const prevMayNavigate = ctl.lastOpMayNavigate;
@@ -227,12 +280,15 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
           ? `No browser with key '${p.key}'. Check the key in the Browsteer popup; it changes when the user chooses "New key".`
           : `No browser with key '${p.key}', and none are connected. Open Chrome or Firefox with the extension.`);
       }
-      ctl.activeKey = p.key;
+      switchTo(ctl, p.key);
       // Tell that browser a session paired with it (the setup guide waits for this). No details about the session.
       try { browsers.get(p.key)!.send(JSON.stringify({ type: "paired" })); } catch {}
       const note = extensionVersionNote(browsers.get(p.key)!.data.extVersion);
-      return ok(`Paired with browser '${p.key}'.${note ? `
-${note}` : ""}`);
+      const all = [...ctl.paired.keys()];
+      const several = all.length > 1
+        ? `\nThis session now has ${all.length} browsers: ${all.map(browserLabel).join(", ")}. The last one paired is the default; pass browser:"${browsers.get(all[0])?.data.browserName ?? all[0]}" (a name or a key) to any tool to use another.`
+        : "";
+      return ok(`Paired with ${browserLabel(p.key)}.${several}${note ? `\n${note}` : ""}`);
     }
     case "snapshot": {
       try {
@@ -561,7 +617,7 @@ ${note}` : ""}`);
         else if (typeof st.wait === "number") { await Bun.sleep(Math.min(st.wait, 5000)); lines.push(`${i + 1}. wait ${st.wait} ms`); continue; }
         else return fail(`do: step ${i + 1} has no verb (find/press/navigate/pursue/wait): ${JSON.stringify(st)}`);
         const ts = performance.now();
-        const r = await execOp(ctl, op, params);
+        const r = await execRouted(ctl, op, params);
         const ms = Math.round(performance.now() - ts);
         const first = r.text.split("\n").find((l) => /^(Clicked|Filled|Goal reached|Stuck|Stopped|Refusing|Not acting|Nothing|Navigated|Pressed|Looping|Step limit)/.test(l)) ?? r.text.split("\n")[0];
         const urlLine = r.text.match(/^URL: (\S+)/m)?.[1]; if (urlLine) lastUrl = urlLine;
@@ -664,7 +720,7 @@ if (process.argv.includes("--stop")) {
         const origin = req.headers.get("origin");
         const peer = classifyOrigin(origin);
         if (peer === "refused") return new Response("forbidden", { status: 403 });
-        if (server.upgrade(req, { data: { role: null, key: null, ctl: null, peer, origin, extVersion: null } })) return;
+        if (server.upgrade(req, { data: { role: null, key: null, ctl: null, peer, origin, extVersion: null, browserName: null } })) return;
         return new Response("browsteer hub", { status: 200 });
       },
       websocket: {
@@ -691,6 +747,7 @@ if (process.argv.includes("--stop")) {
             if (ws.data.key && browsers.get(ws.data.key) === ws) browsers.delete(ws.data.key); // New key: the old one stops working
             ws.data.role = "extension"; ws.data.key = msg.key; browsers.set(msg.key, ws);
             ws.data.extVersion = typeof msg.version === "string" ? msg.version : null;
+            ws.data.browserName = typeof msg.browser === "string" && /^[a-z]{2,12}$/.test(msg.browser) ? msg.browser : null;
             console.error(`[hub] browser registered (extension v${ws.data.extVersion ?? "?"})`);
             // The popup shows a version mismatch, and the semantic-targeting state (never the API key).
             // The folder lets the popup write an exact "update Browsteer" prompt; it is only shown to the person.
@@ -726,7 +783,7 @@ if (process.argv.includes("--stop")) {
             return;
           }
           // The person chose "Let Claude switch site": sessions paired with this browser may start over on a new site.
-          if (msg.type === "unlock" && ws.data.role === "extension") { for (const c of controllers) if (c.activeKey === ws.data.key) c.site = null; return; }
+          if (msg.type === "unlock" && ws.data.role === "extension") { for (const c of controllers) if (c.paired.has(ws.data.key!)) c.site = null; return; }
           if (ws.data.role === "extension") { const pr = pending.get(msg.id); if (!pr || pr.sock !== ws) return; clearTimeout(pr.timer); pending.delete(msg.id); if (msg.ok) { if (Array.isArray(msg.result?._dialogs)) dialogNotes.push(...msg.result._dialogs); pr.resolve(msg.result); } else pr.reject(new Error(msg.error ?? "unknown extension error")); return; }
           if (ws.data.role === "control" && typeof msg.op === "string") { execOp(ws.data.ctl!, msg.op, msg.params ?? {}).then((r) => { const text = dialogNotes.length ? `${r.text}\n⚠ Page dialog${dialogNotes.length > 1 ? "s" : ""}: ${dialogNotes.splice(0).join(" · ")}` : r.text; try { ws.send(JSON.stringify({ id: msg.id, ok: !r.isError, text })); } catch {} }); return; }
         },

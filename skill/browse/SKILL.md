@@ -1,6 +1,6 @@
 ---
 name: browse
-description: Drive a paired Firefox/Chrome browser via the Browsteer extension. Use when the user types `/browse <key> <task>` (e.g. `/browse bst-ab12-cd34-ef56 check the current site's booking review`), or asks to control / read / click through / compare pages in their real logged-in browser. The key (shown in the Browsteer extension popup) selects which browser; the rest is the task.
+description: Drive one or more paired browsers (Chrome, Edge, Brave, Firefox) via the Browsteer extension. Use when the user types `/browse <key> <task>` (e.g. `/browse bst-ab12-cd34-ef56 check the current site's booking review`), or `/browse <key> <key> <task>` to work in two browsers at once (compare, cross-browser checks), or asks to control / read / click through / compare pages in their real logged-in browser. Each key (shown in the Browsteer extension popup) selects a browser; the rest is the task.
 ---
 
 # /browse — drive the user's real browser
@@ -28,14 +28,34 @@ This registers a thin per-session shim; it lazily starts the shared hub
 across sessions). Just have Chrome or Firefox open with the Browsteer extension loaded.
 To stop the hub: `bun run bridge/hub.ts --stop`.
 
+## Several browsers
+
+`/browse` takes more than one key, so one session can check the same page in, say, Edge
+and Firefox:
+
+```
+/browse bst-ab12-cd34-ef56 bst-gh78-jk90-mn12 check that the checkout form validates the same in both
+```
+
+Pair each key (`browser_pair` once per key). The last one paired is the default; pass
+`browser: "edge"` (or `"firefox"`, `"chrome"`, `"brave"`, or a key) to any tool to run that
+one call on another. Replies from a named browser start with `[edge (bst-…)]`. Each browser
+keeps its own pinned tab; the session's one-site lock covers all of them, so open the same
+site in each. Each browser's own popup still decides whether Claude may act there.
+
+To compare, do the same steps in each and report the differences (a field that validates
+in one and not the other, a layout that breaks, a different price or total). Calls to two
+browsers can be made in parallel; the bridge runs them one after another.
+
 ## Procedure
 
-1. **Parse** the argument: first whitespace-delimited token = pairing key; the
-   remainder = the task. If no key is present, ask the user for the
-   key shown in the Browsteer popup; the bridge never picks a browser by itself.
+1. **Parse** the argument: the leading tokens that look like `bst-xxxx-xxxx-xxxx`
+   are pairing keys (one or more); the remainder = the task. If no key is present,
+   ask the user for the key shown in the Browsteer popup; the bridge never picks a
+   browser by itself.
 
-2. **Pair**: call `browser_pair({ key })`. If it errors, tell the user the
-   key was not accepted and stop.
+2. **Pair**: call `browser_pair({ key })` for each key. If one errors, tell the user
+   that key was not accepted. With several keys, see *Several browsers* below.
 
    **Access is the user's to give.** The extension starts locked and works one
    site at a time. When a tool replies that Browsteer is locked, that a site is

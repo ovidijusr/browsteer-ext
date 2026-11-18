@@ -67,6 +67,18 @@ You need [Claude Code](https://claude.com/claude-code) and
    /browse bst-ab12-cd34-ef56 list the open pull requests on this page
    ```
 
+## Two browsers at once
+
+Paste more than one key to check the same page in different browsers, for example Edge
+and Firefox:
+
+```
+/browse bst-ab12-cd34-ef56 bst-gh78-jk90-mn12 check that the signup form validates the same in both
+```
+
+Claude pairs with each browser and can name one per step. Each browser's own popup still
+decides what Claude may do there, and the session stays on one site in all of them.
+
 ## Safe by default
 
 Your browser holds your accounts, so Browsteer starts locked and stays narrow.

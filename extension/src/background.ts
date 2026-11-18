@@ -15,6 +15,12 @@ import type { JevState } from "./keyview";
 // also writes the same port into the manifest's connect-src.
 declare const BRIDGE_PORT: string;
 const BRIDGE_URL = `ws://127.0.0.1:${BRIDGE_PORT}`;
+/** Which browser this is, so a session with several can name them ("edge", "firefox"). */
+const BROWSER_NAME = isFirefox ? "firefox"
+  : /\bEdg\//.test(navigator.userAgent) ? "edge"
+  : (navigator as any).brave ? "brave"
+  : /\bOPR\//.test(navigator.userAgent) ? "opera"
+  : "chrome";
 let ws: WebSocket | null = null;
 // The bridge's version, as the hub reported it on registering (null for hubs before 2.0.0).
 let hubVersion: string | null = null;
@@ -91,7 +97,7 @@ async function getKey(): Promise<string> {
 async function regenerateKey(): Promise<string> {
   const k = genKey();
   await ext.storage.local.set({ bridgeKey: k });
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "register", key: k, version: MY_VERSION }));
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "register", key: k, version: MY_VERSION, browser: BROWSER_NAME }));
   return k;
 }
 
@@ -208,7 +214,7 @@ function connect() {
     const key = await getKey();
     hubVersion = null;
     bridgeDir = null;
-    ws?.send(JSON.stringify({ type: "register", key, version: MY_VERSION }));
+    ws?.send(JSON.stringify({ type: "register", key, version: MY_VERSION, browser: BROWSER_NAME }));
     log("connected & registered as", key);
     setBadge("on");
     // Chrome suspends a service worker after 30 s without events, which would
