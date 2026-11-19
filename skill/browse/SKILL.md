@@ -98,12 +98,27 @@ bridge runs them one after another.
    never a file a page asked for.
 
    **Semantic targeting may be off.** `browser_find` / `browser_pursue` / `browser_do`
-   ask Jev (a TypeSafe model), which sends a page outline to a third party, so the
-   hub ships with it off. Off, `browser_find` still resolves targets that name a
+   ask a model (TypeSafe Jev by default; the user can pick nexos.ai, OpenRouter, a
+   local Ollama or a custom endpoint in Settings), which may send a page outline to
+   a third party, so the hub ships with it off. Off, `browser_find` still resolves targets that name a
    control exactly; anything else replies "Semantic targeting is off" — go straight
    to the snapshot loop (step 4) and do not ask the user to enable it unless they
-   bring it up. Only the user can turn it on (More in the Browsteer popup, or Settings,
-   or `bun run setup`); no tool does.
+   bring it up. Only the user can turn it on or change the provider (More in the
+   Browsteer popup, or Settings, or `bun run setup`); no tool does.
+
+   **Calibrated vs uncalibrated replies.** The find header names who answered:
+   `Targeting: TypeSafe Jev jev-1.13.0, calibrated · 102 candidates, …` or
+   `Targeting: nexos.ai gpt-5, uncalibrated (self-reported probabilities) · …`.
+   Calibrated percentages are real probabilities (Jev, or token logprobs): trust
+   them like before. Uncalibrated ones are the model's own estimate and run high:
+   a 90% there is weaker evidence. With an uncalibrated provider, `act: "click"` /
+   `"fill"` (and `browser_do` find steps) act only at ≥95% and otherwise reply
+   "Not acting: … uncalibrated" with the shortlist — check it (a quick
+   `browser_snapshot` if the names are ambiguous) and click the ref yourself. The
+   irreversible-action guard refuses more often too; click explicitly with
+   `browser_click` only when the user asked for that action. No memos are written
+   from uncalibrated answers, and `browser_pursue` takes a confirming look after
+   each hop.
 
 3. **Fast path first — name the target, skip the tree.** If you can describe
    what you want in words, do not snapshot. Pick by shape of the task:
@@ -113,7 +128,7 @@ bridge runs them one after another.
    - **Next step depends on what the page says** → single calls, reading the
      compact replies between them.
 
-   - `browser_find({ target, act: "click" })` — Jev (TypeSafe) picks the matching
+   - `browser_find({ target, act: "click" })` — the model (Jev by default) picks the matching
      `[ref]` from a fresh snapshot inside the bridge and clicks it when confident
      (~0.3–0.9 s, ~100 tokens back instead of ~2 000+). Without `act` it returns a
      5-line shortlist with probabilities; if the winner is a link its URL is

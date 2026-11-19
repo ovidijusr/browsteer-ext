@@ -177,14 +177,34 @@ extensions page) after `bun run update`.
 
 `browser_find`, `browser_pursue`, and `browser_do` can find a control from a
 description, such as "the export button next to the date range". They do this
-by asking Jev, a paid model run by TypeSafe. Each question sends an outline of
-the page to `api.typesafe.ai`, so the feature is off unless you turn it on.
+by asking a language model. Each question sends an outline of the page to the
+model's provider, so the feature is off unless you turn it on.
 
-To turn it on, create a key at
-[console.typesafe.ai/keys](https://console.typesafe.ai/keys) and paste it into
-**Settings › Find controls by description**. The bridge saves it in
-`~/.config/typesafe/env`, readable only by you; the browser does not keep it.
-`bun run setup` can also ask for the key.
+Pick the provider in **Settings › Find controls by description**:
+
+| Provider | Where page outlines go | Key |
+|---|---|---|
+| TypeSafe Jev (default) | `api.typesafe.ai` | from [console.typesafe.ai/keys](https://console.typesafe.ai/keys) |
+| nexos.ai | `api.nexos.ai` | from your nexos.ai workspace |
+| OpenRouter | `openrouter.ai` | from [openrouter.ai/keys](https://openrouter.ai/keys) |
+| Local (Ollama) | stays on this computer (`127.0.0.1:11434`) | none |
+| Custom | any OpenAI-compatible address (https, or http on this computer) | if it needs one |
+
+For the OpenAI-compatible ones, choose a model from the list the provider
+returns. Paste the key into Settings; the bridge saves it (TypeSafe in
+`~/.config/typesafe/env`, the others in `~/.browsteer/keys.env`), readable only by
+you; the browser does not keep it. `bun run setup` can also ask for a TypeSafe
+key. **Test** runs three sample pages through the model and shows whether it
+picked the right control, how long it took, and whether its answers are
+*calibrated*.
+
+Calibrated means the percentages come from the model's own token probabilities
+(Jev always; other models when the provider returns "logprobs"). When a model
+can't give them, it rates itself, and Browsteer is more careful: it returns a
+shortlist instead of clicking unless the model is at least 95% sure, and refuses
+anything that might buy, send or delete unless the model is clearly sure it
+won't. `bun run bench:targeting` compares providers on labelled tasks; see
+[docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 While it is off, `browser_find` still finds controls named exactly and ones it
 has learned before, without any network call.

@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit -p extension && tsc --noEmit",
     "test": "bun test",
     "reduction": "bun run test/reduction.ts",
+    "bench:targeting": "bun run test/bench-targeting.ts",
     "mcp": "bun run bridge/mcp.ts",
     "hub": "bun run bridge/hub.ts",
     "hub:stop": "bun run bridge/hub.ts --stop",

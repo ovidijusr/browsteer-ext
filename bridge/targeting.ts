@@ -226,7 +226,7 @@ export function openaiProvider(o: OpenAIOptions): Provider {
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: `${renderState(req.state)}\n\n${renderQuestions(qs, mode)}` },
     ];
-    const body: any = { model: o.model, messages, temperature: 0, max_tokens: 40 + 24 * qs.length };
+    const body: any = { model: o.model, messages, temperature: 0, max_tokens: mode === "logprobs" ? 40 + 24 * qs.length : 80 + 80 * qs.length };
     if (mode === "logprobs") { body.logprobs = true; body.top_logprobs = 20; }
     if (mode === "schema") body.response_format = { type: "json_schema", json_schema: { name: "answers", strict: true, schema: answerSchema(qs) } };
     let j: any;
@@ -333,7 +333,7 @@ export function renderState(state: Record<string, string>): string {
 function renderQuestions(qs: QDesc[], mode: AskMode): string {
   const lines = qs.map((q, i) => q.type === "noul"
     ? `${i + 1}. ${q.id}: ${q.text}\n   Answer yes or no. yes = ${q.yes || "yes"}; no = ${q.no || "no"}`
-    : `${i + 1}. ${q.id}: ${q.text}\n   Answer with one number from: ${ranges(q.labels)}${q.legend ? `\n   Options: ${q.legend}` : ""}`);
+    : `${i + 1}. ${q.id}: ${q.text}\n   Answer with one number from: ${ranges(q.labels)}${q.legend ? `\n   Options: ${q.legend}` : ""}\n   Always give a number, even when nothing fits well (then the closest one).`);
   const how = mode === "logprobs"
     ? `Reply with exactly ${qs.length} line${qs.length === 1 ? "" : "s"}, in this order, each "<id>: <answer>" (for example "${qs[0]?.id}: ${qs[0]?.type === "noul" ? "yes" : qs[0]?.labels[0]}"). No other text.`
     : `Reply with one JSON object with a key per question id. A choice question's value is {"ranked": [{"id": "<option>", "p": <probability 0-1 that it is right>}, …]} with your best 1-3 options, best first. A yes/no question's value is {"p_yes": <probability 0-1 that the answer is yes>}.${mode === "json" ? " Reply with the JSON object only." : ""}`;
@@ -409,7 +409,10 @@ export function readLogprobAnswers(lp: LogprobToken[], qs: QDesc[]): Record<stri
     if (!m) return null;
     const pos = m.index + m[0].length;
     if (pos >= text.length) return null;
-    const dist = q.type === "noul" ? yesNoDist(lp, tokenAt(pos), pos - starts[tokenAt(pos)]) : labelDist(lp, tokenAt(pos), pos - starts[tokenAt(pos)], q.labels);
+    let dist = q.type === "noul" ? yesNoDist(lp, tokenAt(pos), pos - starts[tokenAt(pos)]) : labelDist(lp, tokenAt(pos), pos - starts[tokenAt(pos)], q.labels);
+    // A choice answered with something that names no option ("none", "y"): the model
+    // has no candidate. An even spread says exactly that (low confidence, never acted on).
+    if (!dist && q.type === "choice") dist = new Map(q.labels.map((l) => [l, 1 / q.labels.length]));
     if (!dist) return null;
     if (q.type === "noul") { out[q.id] = { type: "noul", noul: dist.get("yes")! }; continue; }
     out[q.id] = choiceAnswer(q, dist);

@@ -69,13 +69,14 @@ acceptable.
   invalidates the key at once.
 - **What Claude does with what it reads.** Page content returned to the session
   goes to Anthropic like the rest of the conversation.
-- **Semantic targeting, if you turn it on.** Page outlines then go to TypeSafe.
+- **Semantic targeting, if you turn it on.** Page outlines then go to the provider chosen in Settings (TypeSafe by default; nothing leaves the computer with a local Ollama).
 
 ## Semantic targeting switch
 
-Semantic targeting (Jev) is a setting of the bridge, not of the extension:
+Semantic targeting is a setting of the bridge, not of the extension:
 `"jev"` in `~/.browsteer/config.json`, off by default. When on, page outlines go
-to TypeSafe (see [PRIVACY.md](PRIVACY.md)). Three places can change it:
+to the provider in `"targeting"` (TypeSafe by default; see [PRIVACY.md](PRIVACY.md)).
+Three places can change it:
 
 - the switch under *More* in the popup, and the one in Settings (the extension's options page).
   These send the bridge a `setJev` message. It and `setJevKey` (below) are the
@@ -98,11 +99,39 @@ back: it tells the extension only whether a key exists. The same checks as
 controller. Keys with spaces or line breaks are refused, so a key cannot add
 lines to the file.
 
+### Who can change the provider
+
+Which provider answers, its address, its model and its key are in the same
+class as the switch: only the extension's own Settings page can change them,
+through the background, as `setTargeting`, `setTargetingKey` and
+`removeTargetingKey` messages that the bridge accepts only from the registered
+extension socket. A controller cannot send them, and neither can it ask for the
+model list or run Test. This matters more than the switch: whoever sets the
+address receives every page outline, so a session that could change it could
+send your pages to a server of its choosing.
+
+- Addresses must be `https://`, or `http://` on 127.0.0.1 / localhost only, with
+  no user name, password, query or fragment. The bridge checks this when it
+  saves the address and again every time it reads it. The presets (nexos.ai,
+  OpenRouter, Ollama) have fixed addresses that `config.json` cannot override.
+- Keys for nexos.ai, OpenRouter and Custom go to `~/.browsteer/keys.env` (mode
+  600; on Windows, your profile folder's permissions). A Custom key is saved
+  together with the address it was entered for and is not sent anywhere else: if
+  the address changes, the key has to be entered again.
+- The bridge tells the extension the provider, host, model and whether a key
+  exists, never the key. Settings › Test sends sample pages written for the test.
+- Errors from a provider name the provider and the HTTP status, never the key.
+- Answers from a model that cannot report token probabilities (*uncalibrated*)
+  are treated with more suspicion: `browser_find` with `act` returns the
+  shortlist unless the model is at least `targeting.uncalibratedActConfidence`
+  sure (0.95 by default), the irreversible-action check refuses unless the model
+  says "no" with at least 90% certainty, and no memos are written from them.
+
 ## Configuration
 
 `~/.browsteer/config.json`. Every key is optional; these are the defaults. The
-bridge writes `extensions` (below) and `jev` (the switch above) itself and keeps
-everything else you put there.
+bridge writes `extensions` (below), `jev` and `targeting` (the settings above)
+itself and keeps everything else you put there.
 
 ```json
 {
@@ -113,9 +142,20 @@ everything else you put there.
   "fetchAnySite": false,
   "downloadDir": "~/Downloads/browsteer",
   "uploadDir": "~/Downloads/browsteer-upload",
-  "logDays": 30
+  "logDays": 30,
+  "targeting": {
+    "provider": "typesafe",
+    "preset": "nexos",
+    "baseUrl": "",
+    "model": "",
+    "uncalibratedActConfidence": 0.95
+  }
 }
 ```
+
+`targeting.provider` is `typesafe` or `openai`; with `openai`, `preset` is
+`nexos`, `openrouter`, `ollama` or `custom`, and `baseUrl` is used only for
+`custom`.
 
 `extensions` is filled in with the first extension that connects. After
 reinstalling the extension in Firefox (its internal address changes), or when

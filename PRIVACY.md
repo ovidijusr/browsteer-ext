@@ -38,7 +38,7 @@ browser's extension settings.
 |---|---|
 | Network | Listens on `127.0.0.1:8787`. Accepts the one extension it is bound to, and local clients that present the secret in `~/.browsteer/token`. Sockets opened by web pages are refused. |
 | Stores | `~/.browsteer/browsteer.db` (SQLite): an action log (time, page address, tool, element reference, outcome), saved snapshot filters, and learned "target → control" names per site. Text typed into fields is logged as a length only; options chosen in drop-downs are logged as chosen. Rows older than 30 days are removed when the hub starts and every six hours after. The folder and its files are readable by your user only. Delete the file to clear everything. |
-| Sends | Results go back to the Claude Code session over stdio. The bridge makes no network requests of its own unless semantic targeting is on. |
+| Sends | Results go back to the Claude Code session over stdio. The bridge makes no network requests of its own unless semantic targeting is on, or you ask for the model list or run Test in Settings. |
 
 ## Claude
 
@@ -48,21 +48,34 @@ reads. Browsteer adds nothing to that and sends nothing to Anthropic itself.
 
 ## Semantic targeting (optional)
 
-`browser_find`, `browser_pursue` and `browser_do` can ask Jev, a model run by
-TypeSafe, which control matches a description. Each such question sends the
-page address, title and an outline of the page (control names and visible text,
-up to 60,000 characters) to `api.typesafe.ai`.
+`browser_find`, `browser_pursue` and `browser_do` can ask a language model which
+control matches a description. Each such question sends the page address, title
+and an outline of the page (control names and visible text, up to 60,000
+characters) to the provider chosen in Settings:
+
+- **TypeSafe Jev** (the default): `api.typesafe.ai`.
+- **nexos.ai**: `api.nexos.ai`. **OpenRouter**: `openrouter.ai`, which passes it
+  on to the company that runs the model you chose.
+- **Local (Ollama)**: `127.0.0.1:11434`. Nothing leaves this computer.
+- **Custom**: the address you typed. It must be `https://`, or `http://` on
+  127.0.0.1 / localhost.
+
+That provider's own privacy terms apply to what it receives. Settings names the
+host that page outlines go to, and the hub prints it when it starts.
 
 This is off by default. It is on only if `~/.browsteer/config.json` contains
-`{"jev": true}` or the hub is started with `BROWSTEER_JEV=1`, and a
-`TYPESAFE_API_KEY` is present. You can switch it under *More* in the
-popup, in Settings, or with `bun run setup`; the popup and Settings show
-whether it is on and whether the bridge has a key. The key itself stays on
-this computer: pasted into Settings or typed into `bun run setup`, it is saved
-in `~/.config/typesafe/env` (or set `TYPESAFE_API_KEY` in the bridge's
-environment). The extension passes a pasted key to the bridge and does not
-keep it. The hub prints the current state when it starts. Do not turn it on
-for pages whose content must not leave your organisation.
+`{"jev": true}` or the hub is started with `BROWSTEER_JEV=1`, and the provider
+has a key (a provider on this computer needs none). You can switch it under
+*More* in the popup, in Settings, or with `bun run setup`; the popup and Settings
+show whether it is on, which provider answers, and whether the bridge has a key.
+Keys stay on this computer: pasted into Settings (or, for TypeSafe, typed into
+`bun run setup`), they are saved in `~/.config/typesafe/env` (TypeSafe) or
+`~/.browsteer/keys.env` (the others), readable only by you, or can be set in the
+bridge's environment (`TYPESAFE_API_KEY`, `NEXOS_API_KEY`, `OPENROUTER_API_KEY`).
+The extension passes a pasted key to the bridge and does not keep it. **Test** in
+Settings sends three sample pages written for the test, never one of yours. Do
+not turn it on for pages whose content must not leave your organisation, unless
+the provider is one your organisation runs or allows.
 
 ## Pairing key
 
