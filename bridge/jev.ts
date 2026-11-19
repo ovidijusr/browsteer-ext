@@ -8,11 +8,10 @@
 // EVERYTHING a human should review lives in this file: the questions, the
 // thresholds, and the state trimming. Nothing here touches the browser; hub.ts
 // owns snapshot/click and calls into these functions.
-import { TypeSafeClient, choice, noul } from "@typesafe-ai/sdk";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { choice, noul } from "@typesafe-ai/sdk";
 import { loadConfig } from "./security";
+import { TYPESAFE_ENV_FILE, activeKeyPresent, buildProvider, loadTypesafeKey, targetingConfig, targetingInfo, writeEnvLine, type Provider, type TargetingInfo } from "./targeting";
+export { TYPESAFE_ENV_FILE } from "./targeting";
 
 // ── Thresholds (tune against ~/.browsteer/browsteer.db actions.detail) ───────
 export const THRESHOLDS = {
@@ -83,71 +82,73 @@ export function lexicalMatch(target: string, cands: Candidate[]): Candidate | nu
 // Warm the TLS connection at hub start so the first find is not the slow one.
 export async function warm(): Promise<void> {
   if (!jevEnabled()) return;
-  try { await client().models.list(); } catch {}
+  try { await activeProvider().warm(); } catch {}
 }
 
+// ── Uncalibrated providers ───────────────────────────────────────────────────
+// An OpenAI-compatible model that cannot return token logprobs reports its own
+// probabilities, which run high and are not what THRESHOLDS were tuned on. Then:
+// find acts (click/fill) only at or above `targeting.uncalibratedActConfidence`
+// (config.json, default 0.95), else it returns the shortlist; the irreversible-
+// action guard refuses unless the model is clearly sure the click is harmless;
+// no memos are written from such answers; pursue does not skip the confirming
+// look after a "this click reaches the goal" prediction.
+export const UNCALIBRATED = {
+  guard: 0.1, // guard p(irreversible) above this → refuse (calibrated: THRESHOLDS.guard)
+} as const;
+
 // ── Opt-in ───────────────────────────────────────────────────────────────────
-// Asking Jev sends an outline of the current page (control names + visible text)
-// to api.typesafe.ai. That is off unless the person running the hub turned it
-// on: BROWSTEER_JEV=1 in the hub's environment, or {"jev": true} in
-// ~/.browsteer/config.json, which the popup's switch and `bun run setup` write. Off, find answers from the page alone (memos +
-// exact names) and pursue is unavailable; nothing leaves the machine.
-export const JEV_OFF = 'Semantic targeting is off, so no page content is sent to TypeSafe. The user can turn it on in the Browsteer Settings page (or {"jev": true} in ~/.browsteer/config.json, see PRIVACY.md). Meanwhile use browser_snapshot and act on refs.';
+// Asking a model sends an outline of the current page (control names + visible
+// text) to the configured provider (api.typesafe.ai by default; see targeting.ts).
+// That is off unless the person running the hub turned it on: BROWSTEER_JEV=1 in
+// the hub's environment, or {"jev": true} in ~/.browsteer/config.json, which the
+// Settings page's switch and `bun run setup` write. Off, find answers from the page
+// alone (memos + exact names) and pursue is unavailable; nothing leaves the machine.
+export const JEV_OFF = 'Semantic targeting is off, so no page content is sent to a model. The user can turn it on in the Browsteer Settings page, under "Find controls by description" (or {"jev": true} in ~/.browsteer/config.json, see PRIVACY.md). Meanwhile use browser_snapshot and act on refs.';
 export function jevEnabled(): boolean {
   const env = process.env.BROWSTEER_JEV;
   if (env != null) return env === "1" || env === "true";
   return loadConfig().jev;
 }
 
-/** What the extension may show about semantic targeting: on or off, and whether a key exists. Never the key. */
-export function jevState(): { on: boolean; keyPresent: boolean; envOverride: boolean } {
-  return { on: jevEnabled(), keyPresent: loadApiKey() !== null, envOverride: process.env.BROWSTEER_JEV != null };
+/** What the extension may show about semantic targeting: on or off, whether a key exists, and the provider. Never the key. */
+export function jevState(): { on: boolean; keyPresent: boolean; envOverride: boolean; targeting: TargetingInfo } {
+  const cfg = targetingConfig();
+  return { on: jevEnabled(), keyPresent: activeKeyPresent(cfg), envOverride: process.env.BROWSTEER_JEV != null, targeting: targetingInfo(cfg) };
 }
 
 export const MAX_STATE_CHARS = 60_000; // ≈15k tokens; Jev's state budget is 32k tokens
 export const CHOICE_MAX = 255;         // API limit on Choice options
 export const SHORTLIST_PER_BATCH = 3;  // survivors per batch when >255 candidates
 
-// ── Key + client ─────────────────────────────────────────────────────────────
+// ── Key + provider ───────────────────────────────────────────────────────────
 // The hub is spawned detached from a Claude session, so the env rarely carries
 // the key. Fall back to the same file the `jev` skill and jev-sample use.
-/** Where `bun run setup` writes the key, and where the hub looks when the environment has none. */
-export const TYPESAFE_ENV_FILE = process.env.TYPESAFE_ENV_FILE || join(homedir(), ".config", "typesafe", "env");
-export function loadApiKey(): string | null {
-  if (process.env.TYPESAFE_API_KEY) return process.env.TYPESAFE_API_KEY;
-  if (!existsSync(TYPESAFE_ENV_FILE)) return null;
-  const m = readFileSync(TYPESAFE_ENV_FILE, "utf8").match(/^\s*TYPESAFE_API_KEY=(.+)$/m);
-  return m && m[1].trim() ? m[1].trim() : null;
-}
+// (OpenAI-compatible keys live in ~/.browsteer/keys.env, see targeting.ts.)
+export const loadApiKey = loadTypesafeKey;
 /** Write TYPESAFE_API_KEY into the env file (bun run setup), keeping its other lines. Readable by this user only. */
 export function saveApiKey(key: string, file = TYPESAFE_ENV_FILE): void {
-  if (!key || /\s/.test(key)) throw new Error("An API key has no spaces or line breaks.");
-  let lines: string[] = [];
-  try { lines = readFileSync(file, "utf8").split(/\r?\n/).filter((l) => l && !/^\s*TYPESAFE_API_KEY=/.test(l)); } catch {}
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  writeFileSync(file, [...lines, `TYPESAFE_API_KEY=${key}`].join("\n") + "\n", { mode: 0o600 });
-  try { chmodSync(file, 0o600); } catch {} // the mode above only applies to a new file
+  writeEnvLine(file, "TYPESAFE_API_KEY", key);
 }
-
 /** Remove TYPESAFE_API_KEY from the env file, keeping its other lines. */
 export function removeApiKey(file = TYPESAFE_ENV_FILE): void {
-  let lines: string[];
-  try { lines = readFileSync(file, "utf8").split(/\r?\n/).filter((l) => l && !/^\s*TYPESAFE_API_KEY=/.test(l)); } catch { return; }
-  writeFileSync(file, lines.length ? lines.join("\n") + "\n" : "", { mode: 0o600 });
+  writeEnvLine(file, "TYPESAFE_API_KEY", null);
 }
 
-let _client: TypeSafeClient | null = null;
-/** Forget the cached client, so the next call reads the key again (after the Settings page saved a new one). */
-export function resetClient(): void { _client = null; }
-export function client(): TypeSafeClient {
-  // Checked before the cached client: the switch can now be turned off while the hub runs.
+let _provider: Provider | null = null;
+let _sig = "";
+/** Forget the cached provider, so the next call reads config and keys again (after the Settings page changed them). */
+export function resetClient(): void { _provider = null; }
+/** The provider config.json names, while semantic targeting is on. */
+export function activeProvider(): Provider {
+  // Checked before the cached provider: the switch can be turned off while the hub runs.
   if (!jevEnabled()) throw new Error(JEV_OFF);
-  if (_client) return _client;
-  const apiKey = loadApiKey();
-  if (!apiKey) throw new Error("Jev unavailable: no TYPESAFE_API_KEY in env or ~/.config/typesafe/env (see the `jev` skill).");
-  // Pinned: thresholds above were tuned on this version. Override with TYPESAFE_DEFAULT_MODEL.
-  _client = new TypeSafeClient({ apiKey, defaultModel: process.env.TYPESAFE_DEFAULT_MODEL ?? "jev-1.13.0", timeout: 20_000 });
-  return _client;
+  const cfg = targetingConfig();
+  const sig = JSON.stringify(cfg) + (activeKeyPresent(cfg) ? "+key" : "");
+  if (_provider && sig === _sig) return _provider;
+  _provider = buildProvider(cfg);
+  _sig = sig;
+  return _provider;
 }
 
 // ── Candidates from the snapshot text ────────────────────────────────────────
@@ -277,7 +278,12 @@ export interface FindResult {
   candidates: number;
   deduped: number;           // exact-duplicate controls removed from the state
   model: string;
+  /** Who answered: "TypeSafe Jev", "nexos.ai", … ("memo"/"lexical" when no model was asked). */
+  provider: string;
+  /** Probabilities are real (Jev, or token logprobs), not self-reported by the model. */
+  calibrated: boolean;
   inputTokens: number;
+  outputTokens: number;
   requests: number;
 }
 
@@ -286,7 +292,11 @@ export interface FindResult {
 // on this very page (as role+name keys from `candKey`, since refs are reassigned
 // per snapshot) — they leave the option list so a loop cannot re-pick them.
 export const candKey = (c: { role: string; name: string }) => `${c.role}\u0000${c.name}`;
-interface Common { url: string; title?: string; tree: string; pursue?: boolean; history?: string; exclude?: Set<string>; hint?: boolean }
+interface Common {
+  url: string; title?: string; tree: string; pursue?: boolean; history?: string; exclude?: Set<string>; hint?: boolean;
+  /** Ask this provider instead of the configured one (Settings → Test, the benchmark). */
+  provider?: Provider;
+}
 export interface FindInput extends Common { target: string }
 export interface FindManyInput extends Common { targets: string[] }
 
@@ -327,8 +337,9 @@ export const TEXT_CAP = 120;
 // pursue questions are asked once. Results come back in `targets` order.
 export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
   const { tree, cands, deduped } = buildState(inp);
-  const empty = (t: string): FindResult => ({ target: t, exists: 0, confidence: 0, ranked: [], candidates: 0, deduped, model: "-", inputTokens: 0, requests: 0 });
+  const empty = (t: string): FindResult => ({ target: t, exists: 0, confidence: 0, ranked: [], candidates: 0, deduped, model: "-", provider: "-", calibrated: true, inputTokens: 0, outputTokens: 0, requests: 0 });
   if (!cands.length) return inp.targets.map(empty);
+  const P = inp.provider ?? activeProvider();
   const state: Record<string, string> = { url: inp.url, title: inp.title ?? "", page: tree };
   if (inp.history) state.history = inp.history;
   const byRef = new Map(cands.map((c) => [c.ref, c]));
@@ -348,8 +359,9 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
   // a miss costs one request instead of three.
   if (inp.hint) inp.targets.forEach((t, ti) => { questions[`toward_${ti}`] = Q.toward(t, batches[0]); });
 
-  const r1 = await client().systemOne({ state, questions });
-  let inputTokens = r1.usage.input_tokens;
+  const r1 = await P.systemOne({ state, questions });
+  let inputTokens = r1.usage.input_tokens, outputTokens = r1.usage.output_tokens;
+  let calibrated = r1.calibrated;
   let requests = 1;
   const A = r1.answers as Record<string, any>;
 
@@ -372,8 +384,9 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
     // The finalists only, not the whole page again: on a 1 300-ref page this is
     // ~20 lines instead of ~13k tokens, and the lines carry role + name already.
     const state2 = { url: inp.url, title: inp.title ?? "", page: [...allSurvivors.values()].map((c) => c.line).join("\n") };
-    const r2 = await client().systemOne({ state: state2, questions: q2 });
-    inputTokens += r2.usage.input_tokens; requests++;
+    const r2 = await P.systemOne({ state: state2, questions: q2 });
+    inputTokens += r2.usage.input_tokens; outputTokens += r2.usage.output_tokens; requests++;
+    calibrated &&= r2.calibrated;
     second = r2.answers as Record<string, any>;
   }
 
@@ -391,7 +404,10 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
       candidates: cands.length,
       deduped,
       model: r1.model,
+      provider: P.label,
+      calibrated,
       inputTokens: ti === 0 ? inputTokens : 0, // tokens are billed once per request; attribute to the first
+      outputTokens: ti === 0 ? outputTokens : 0,
       requests: ti === 0 ? requests : 0,
     };
   });
@@ -399,13 +415,18 @@ export async function findMany(inp: FindManyInput): Promise<FindResult[]> {
 
 // Tiny second request: only the chosen element's line plus the goal, so the
 // judgment is about that control and nothing else on the page.
-export async function guardClick(cand: Ranked, goal: string, url: string): Promise<number> {
-  const r = await client().systemOne({
+export async function guardJudge(cand: Ranked, goal: string, url: string, provider?: Provider): Promise<{ g: number; calibrated: boolean }> {
+  const r = await (provider ?? activeProvider()).systemOne({
     state: { url, goal, element: `[${cand.ref}] ${cand.role} ${JSON.stringify(cand.name)}` },
     questions: { guard: Q.guard() },
   });
-  return (r.answers.guard as any).noul;
+  return { g: (r.answers.guard as any).noul, calibrated: r.calibrated };
 }
+export async function guardClick(cand: Ranked, goal: string, url: string): Promise<number> {
+  return (await guardJudge(cand, goal, url)).g;
+}
+/** Refuse the click? Uncalibrated answers refuse unless the model is clearly sure the click is harmless. */
+export const guardRefuses = (g: number, calibrated: boolean) => g >= (calibrated ? THRESHOLDS.guard : UNCALIBRATED.guard);
 
 // ── Formatting shared by hub ops ─────────────────────────────────────────────
 export const pct = (x: number) => `${Math.round(x * 100)}%`;

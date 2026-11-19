@@ -55,6 +55,7 @@ beforeAll(async () => {
   const env: Record<string, string | undefined> = { ...process.env, BRIDGE_PORT: String(PORT), BROWSTEER_DB_DIR: DB_DIR, TYPESAFE_ENV_FILE: KEY_FILE() };
   delete env.BROWSTEER_JEV;
   delete env.TYPESAFE_API_KEY;
+  for (const k of ["NEXOS_API_KEY", "OPENROUTER_API_KEY", "OLLAMA_API_KEY", "BROWSTEER_CUSTOM_API_KEY", "BROWSTEER_KEYS_FILE"]) delete env[k];
   hub = Bun.spawn(["bun", "run", "bridge/hub.ts"], {
     cwd: ROOT,
     env,
@@ -514,7 +515,8 @@ describe("semantic targeting switch", () => {
 
   test("registering reports the state: off, no key, no override", () => {
     const reg = notes.find((n) => n.type === "registered");
-    expect(reg.jev).toEqual({ on: false, keyPresent: false, envOverride: false });
+    expect(reg.jev).toMatchObject({ on: false, keyPresent: false, envOverride: false });
+    expect(reg.jev.targeting).toMatchObject({ provider: "typesafe", host: "api.typesafe.ai" });
   });
 
   test("the extension can turn it on, and the hub saves it in config.json", async () => {
@@ -555,7 +557,7 @@ describe("semantic targeting switch", () => {
     writeFileSync(KEY_FILE(), `OTHER=1\nTYPESAFE_API_KEY=${secret}\n`);
     const before = notes.length;
     const r = await fromExtension({ type: "jevStatus" });
-    expect(r).toEqual({ type: "jev", on: false, keyPresent: true, envOverride: false });
+    expect(r).toMatchObject({ type: "jev", on: false, keyPresent: true, envOverride: false });
     expect(JSON.stringify(notes.slice(before))).not.toContain(secret);
   });
 
@@ -574,7 +576,7 @@ describe("semantic targeting switch", () => {
     const secret = "tsk-new-SECRET-9876543210";
     const before = notes.length;
     const r = await fromExtension({ type: "setJevKey", key: secret });
-    expect(r).toEqual({ type: "jev", on: true, keyPresent: true, envOverride: false });
+    expect(r).toMatchObject({ type: "jev", on: true, keyPresent: true, envOverride: false });
     const file = readFileSync(KEY_FILE(), "utf8");
     expect(file).toContain(`TYPESAFE_API_KEY=${secret}`);
     expect(file).toContain("OTHER=1");
@@ -587,10 +589,131 @@ describe("semantic targeting switch", () => {
   test("the Settings page can remove the key: line gone, other lines kept, Jev off", async () => {
     await fromExtension({ type: "setJev", on: true });
     const r = await fromExtension({ type: "removeJevKey" });
-    expect(r).toEqual({ type: "jev", on: false, keyPresent: false, envOverride: false });
+    expect(r).toMatchObject({ type: "jev", on: false, keyPresent: false, envOverride: false });
     const file = readFileSync(KEY_FILE(), "utf8");
     expect(file).not.toContain("TYPESAFE_API_KEY");
     expect(file).toContain("OTHER=1");
+  });
+});
+
+// The targeting provider (bridge/targeting.ts) is chosen on the Settings page only:
+// the base URL decides where page outlines go, so a controller must not be able to
+// change it, its model or its key. A fake OpenAI-compatible server stands in for
+// nexos.ai; it answers with token logprobs, or refuses them (HTTP 400) in "json" mode.
+describe("targeting provider (Settings page only)", () => {
+  const config = () => JSON.parse(readFileSync(join(DB_DIR, "config.json"), "utf8"));
+  const keysFile = () => { try { return readFileSync(join(DB_DIR, "keys.env"), "utf8"); } catch { return ""; } };
+  const RIGHT: Record<string, number> = { payment: 10, password: 2, discount: 7 };
+  let mode: "logprobs" | "json" = "logprobs";
+  const auth: string[] = [];
+  const server = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      const u = new URL(req.url);
+      auth.push(req.headers.get("authorization") ?? "");
+      if (u.pathname === "/v1/models") return Response.json({ data: [{ id: "fake-b" }, { id: "fake-a" }] });
+      const b: any = await req.json();
+      const prompt = String(b.messages[1].content);
+      const ids = [...prompt.matchAll(/^\d+\. (\w+): /gm)].map((m) => m[1]);
+      const ref = Object.entries(RIGHT).find(([w]) => prompt.includes(w))?.[1] ?? 1;
+      if (mode === "json") {
+        if (b.logprobs) return Response.json({ error: { message: "logprobs not supported" } }, { status: 400 });
+        const out = Object.fromEntries(ids.map((id) => [id, /^(where|toward)/.test(id) ? { ranked: [{ id: String(ref), p: 0.9 }] } : { p_yes: 0.9 }]));
+        return Response.json({ model: b.model, choices: [{ message: { content: JSON.stringify(out) } }], usage: { prompt_tokens: 50, completion_tokens: 20 } });
+      }
+      const tok = (token: string, p: number, alt?: [string, number]) => ({ token, logprob: Math.log(p), top_logprobs: [{ token, logprob: Math.log(p) }, ...(alt ? [{ token: alt[0], logprob: Math.log(alt[1]) }] : [])] });
+      const content = ids.flatMap((id) => [tok(id, 1), tok(":", 1), /^(where|toward)/.test(id) ? tok(` ${ref}`, 0.9, [" 3", 0.1]) : tok(" yes", 0.95, [" no", 0.05]), tok("\n", 1)]);
+      return Response.json({ model: b.model, choices: [{ message: { content: content.map((t) => t.token).join("") }, logprobs: { content } }], usage: { prompt_tokens: 50, completion_tokens: 8 } });
+    },
+  });
+  const FAKE = `http://127.0.0.1:${server.port}/v1`;
+  afterAll(() => server.stop(true));
+
+  /** Send as the registered extension and wait for the hub's answer of `type`. */
+  async function fromSettings(msg: object, type = "jev", waitMs = 3000): Promise<any> {
+    const before = notes.length;
+    ext.send(JSON.stringify(msg));
+    for (let i = 0; i < waitMs / 25; i++) {
+      const hit = notes.slice(before).find((n) => n.type === type);
+      if (hit) return hit;
+      await Bun.sleep(25);
+    }
+    return null;
+  }
+
+  test("a controller cannot set the provider, its address, a key, or run a test", async () => {
+    const before = JSON.stringify(config().targeting ?? null);
+    ctl.send(JSON.stringify({ type: "setTargeting", provider: "openai", preset: "custom", baseUrl: "https://collector.evil.example/v1", model: "x" }));
+    ctl.send(JSON.stringify({ type: "setTargetingKey", key: "from-claude-0000" }));
+    ctl.send(JSON.stringify({ type: "testTargeting" }));
+    ctl.send(JSON.stringify({ type: "listModels" }));
+    await Bun.sleep(150);
+    expect(JSON.stringify(config().targeting ?? null)).toBe(before);
+    expect(keysFile()).not.toContain("from-claude");
+    expect(auth.length).toBe(0); // nothing was asked of any server
+  });
+
+  test("an address that isn't https (or http on this computer) is refused with a reason", async () => {
+    const r = await fromSettings({ type: "setTargeting", provider: "openai", preset: "custom", baseUrl: "http://collector.evil.example/v1", model: "x" });
+    expect(r.error).toContain("https://");
+    expect(config().targeting).toBeUndefined();
+  });
+
+  test("the Settings page picks a provider; the state names the host, never a key", async () => {
+    const r = await fromSettings({ type: "setTargeting", provider: "openai", preset: "custom", baseUrl: FAKE + "/", model: "fake-a" });
+    expect(r.error).toBeUndefined();
+    expect(r.targeting).toMatchObject({ provider: "openai", preset: "custom", label: "Custom", baseUrl: FAKE, host: `127.0.0.1:${server.port}`, local: true, model: "fake-a", keyNeeded: false, calibrated: null });
+    expect(r.keyPresent).toBe(true); // nothing needed on this computer
+    expect(config().targeting).toMatchObject({ provider: "openai", preset: "custom", baseUrl: FAKE, model: "fake-a" });
+  });
+
+  test("the model list comes from the provider", async () => {
+    const r = await fromSettings({ type: "listModels" }, "models");
+    expect(r).toEqual({ type: "models", models: ["fake-a", "fake-b"] });
+  });
+
+  test("a key from the Settings page goes to keys.env, is used as Bearer, and is never sent back", async () => {
+    const secret = "cu-SECRET-0123456789";
+    const before = notes.length;
+    const r = await fromSettings({ type: "setTargetingKey", key: secret });
+    expect(r).toMatchObject({ on: true, keyPresent: true });
+    expect(keysFile()).toContain(`BROWSTEER_CUSTOM_API_KEY=${secret}`);
+    expect(keysFile()).toContain(`BROWSTEER_CUSTOM_API_KEY_FOR=${FAKE}`);
+    expect(JSON.stringify(notes.slice(before))).not.toContain(secret);
+    auth.length = 0;
+    await fromSettings({ type: "listModels" }, "models");
+    expect(auth).toContain(`Bearer ${secret}`);
+  });
+
+  test("Test runs canned pages and reports right/wrong, latency and calibration", async () => {
+    const r = await fromSettings({ type: "testTargeting" }, "targetingTest", 8000);
+    expect(r).toMatchObject({ ok: true, provider: "Custom", model: "fake-a", calibrated: true });
+    expect(r.rows.length).toBe(3);
+    expect(r.rows.every((x: any) => x.correct && typeof x.ms === "number")).toBe(true);
+  });
+
+  test("find names the provider and model, calibrated, in its header", async () => {
+    canned.snapshot = { ...snapResult("https://a.example/one", 42), tree: 'region\n  [1] button "Go"\n  [2] link "Pay now"' };
+    const r = await ask("find", { target: "go on with the thing", fresh: true });
+    expect(r.text).toContain("Targeting: Custom fake-a, calibrated");
+  });
+
+  test("uncalibrated answers (no logprobs) do not click below the bar; the shortlist comes back", async () => {
+    mode = "json";
+    canned.snapshot = { ...snapResult("https://a.example/one", 42), tree: 'region\n  [1] button "Go"\n  [2] link "Open the overview"' };
+    seenOps.length = 0;
+    const r = await ask("find", { target: "the thing that opens what I want", act: "click", fresh: true });
+    expect(r.text).toContain("uncalibrated");
+    expect(r.text).toContain("Not acting");
+    expect(seenOps.some((o) => o.op === "click")).toBe(false);
+    mode = "logprobs";
+  });
+
+  test("back to TypeSafe: the old setting works as before", async () => {
+    const r = await fromSettings({ type: "setTargeting", provider: "typesafe" });
+    expect(r.targeting).toMatchObject({ provider: "typesafe", label: "TypeSafe Jev", host: "api.typesafe.ai" });
+    await fromSettings({ type: "setJev", on: false });
+    expect(config().jev).toBe(false);
   });
 });
 

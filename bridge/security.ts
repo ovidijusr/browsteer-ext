@@ -28,6 +28,8 @@ export interface Config {
   uploadDir: string;
   /** Days of action log to keep. */
   logDays: number;
+  /** Which model answers semantic targeting, as written (targeting.ts parses and checks it). */
+  targeting?: Record<string, unknown>;
 }
 const DEFAULTS: Config = {
   jev: false, extensions: [], siteLock: true, fetchWrite: false, fetchAnySite: false,
@@ -44,6 +46,7 @@ export function loadConfig(): Config {
   if (typeof raw.downloadDir === "string" && raw.downloadDir) c.downloadDir = expandHome(raw.downloadDir);
   if (typeof raw.uploadDir === "string" && raw.uploadDir) c.uploadDir = expandHome(raw.uploadDir);
   if (Number.isFinite(raw.logDays) && raw.logDays > 0) c.logDays = raw.logDays;
+  if (raw.targeting && typeof raw.targeting === "object" && !Array.isArray(raw.targeting)) c.targeting = raw.targeting;
   return c;
 }
 

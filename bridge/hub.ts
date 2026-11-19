@@ -15,7 +15,9 @@ import { DATA_DIR, classifyOrigin, ensureToken, extensionAllowed, loadConfig, lo
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { THRESHOLDS, MEMO, JEV_OFF, TYPESAFE_ENV_FILE, jevEnabled, jevState, removeApiKey, resetClient, saveApiKey, findTarget, findMany, guardClick, needsGuard, warm, formatShortlist, pct, parseCandidates, memoMatch, lexicalMatch, candKey, type Ranked, type Candidate, type FindResult } from "./jev";
+import { THRESHOLDS, MEMO, JEV_OFF, TYPESAFE_ENV_FILE, jevEnabled, jevState, removeApiKey, resetClient, saveApiKey, findTarget, findMany, guardJudge, guardRefuses, needsGuard, warm, formatShortlist, pct, parseCandidates, memoMatch, lexicalMatch, candKey, type Ranked, type Candidate, type FindResult } from "./jev";
+import { KEYS_FILE, PRESETS, TYPESAFE_MODEL, buildProvider, checkBaseUrl, isPreset, listModels, loadKey, removeKey, saveKey, targetingConfig, targetingInfo } from "./targeting";
+import { TEST_TASKS, runTasks } from "./targeting-tasks";
 import type { ServerWebSocket } from "bun";
 import { VERSION, extensionVersionNote } from "./version";
 /** The Browsteer folder (the git checkout), where `bun run update` runs. */
@@ -189,13 +191,18 @@ async function jevSnapshot(ctl: Controller, withText: boolean): Promise<any> {
   throw lastErr;
 }
 // Guard only when the name smells like a commitment; otherwise 0 without a round trip.
-async function maybeGuard(cand: Ranked, goal: string, url: string): Promise<{ g: number; asked: boolean }> {
-  if (!needsGuard(cand)) return { g: 0, asked: false };
-  // Without Jev nobody can judge whether a commitment-sounding control is safe:
+async function maybeGuard(cand: Ranked, goal: string, url: string): Promise<{ g: number; asked: boolean; refuse: boolean; calibrated: boolean }> {
+  if (!needsGuard(cand)) return { g: 0, asked: false, refuse: false, calibrated: true };
+  // Without a model nobody can judge whether a commitment-sounding control is safe:
   // treat it as irreversible so the click is refused and Claude must ask for it.
-  if (!jevEnabled()) return { g: 1, asked: false };
-  return { g: await guardClick(cand, goal, url), asked: true };
+  if (!jevEnabled()) return { g: 1, asked: false, refuse: true, calibrated: true };
+  // An uncalibrated answer refuses unless it is clearly "harmless" (guardRefuses in jev.ts).
+  const { g, calibrated } = await guardJudge(cand, goal, url);
+  return { g, asked: true, refuse: guardRefuses(g, calibrated), calibrated };
 }
+/** "TypeSafe Jev jev-1.13.0, calibrated" / "nexos.ai gpt-4.1-mini, uncalibrated (self-reported probabilities)". */
+const providerLine = (r: { provider: string; model: string; calibrated: boolean }) =>
+  `${r.provider} ${r.model}, ${r.calibrated ? "calibrated" : "uncalibrated (self-reported probabilities)"}`;
 // Click, then wait for the page to react by polling the content script's
 // mutation counter from HERE (page timers are throttled in background tabs;
 // extension messaging is not). Settled = URL changed, or no DOM mutations for
@@ -676,28 +683,32 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
         const retried = false;
         if (askJev.length) {
           results = await timed("jev", () => findMany({ targets: askJev, url: snap.url, title: snap.title, tree: snap.tree, hint: targets.length === 1 }));
-          // Teach the memo store from confident verdicts only (thresholds in jev.ts MEMO).
+          // Teach the memo store from confident, calibrated verdicts only (thresholds in jev.ts MEMO):
+          // self-reported probabilities run high, and a wrong memo would be clicked again and again.
           for (const r of results) {
             const top = r.ranked[0];
-            if (top && r.exists >= MEMO.minExists && r.confidence >= MEMO.minConfidence && top.p >= MEMO.minP) saveMemo(snap.url, r.target, top.role, top.name);
+            if (top && r.calibrated && r.exists >= MEMO.minExists && r.confidence >= MEMO.minConfidence && top.p >= MEMO.minP) saveMemo(snap.url, r.target, top.role, top.name);
           }
         }
         // Merge back in `targets` order; memo hits look like a certain Jev answer.
         const jevByTarget = new Map(results.map((r) => [r.target, r]));
         const merged: (FindResult & { memo?: Memo; lexical?: boolean })[] = targets.map((t, i) => {
           const h = memoHits.get(i); const lx = lexHits.get(i);
-          if (h) { bumpMemo(h.memo.id); return { target: t, exists: 1, confidence: 1, ranked: [{ ref: h.cand.ref, p: 1, role: h.cand.role, name: h.cand.name }], candidates: cands.length, deduped: 0, model: "memo", inputTokens: 0, requests: 0, memo: h.memo }; }
-          if (lx) return { target: t, exists: 1, confidence: 1, ranked: [{ ref: lx.ref, p: 1, role: lx.role, name: lx.name }], candidates: cands.length, deduped: 0, model: "lexical", inputTokens: 0, requests: 0, lexical: true };
+          if (h) { bumpMemo(h.memo.id); return { target: t, exists: 1, confidence: 1, ranked: [{ ref: h.cand.ref, p: 1, role: h.cand.role, name: h.cand.name }], candidates: cands.length, deduped: 0, model: "memo", provider: "memo", calibrated: true, inputTokens: 0, outputTokens: 0, requests: 0, memo: h.memo }; }
+          if (lx) return { target: t, exists: 1, confidence: 1, ranked: [{ ref: lx.ref, p: 1, role: lx.role, name: lx.name }], candidates: cands.length, deduped: 0, model: "lexical", provider: "lexical", calibrated: true, inputTokens: 0, outputTokens: 0, requests: 0, lexical: true };
           return jevByTarget.get(t)!;
         });
         const first = results[0];
-        const tok = first?.inputTokens ?? 0, reqs = first?.requests ?? 0, model = first?.model ?? (memoHits.size ? "memo" : "lexical");
-        const memoNote = memoHits.size ? `, ${memoHits.size} from memo (${[...memoHits.values()].map((h) => `hits ${h.memo.hits + 1}`).join(", ")}; pass fresh:true to re-ask Jev)` : "";
-        const lexNote = lexHits.size ? `, ${lexHits.size} lexical (target names the element; fresh:true to ask Jev)` : "";
+        const tok = (first?.inputTokens ?? 0) + (first?.outputTokens ?? 0), reqs = first?.requests ?? 0, model = first?.model ?? (memoHits.size ? "memo" : "lexical");
+        const calibrated = results.every((x) => x.calibrated);
+        const memoNote = memoHits.size ? `, ${memoHits.size} from memo (${[...memoHits.values()].map((h) => `hits ${h.memo.hits + 1}`).join(", ")}; pass fresh:true to re-ask the model)` : "";
+        const lexNote = lexHits.size ? `, ${lexHits.size} lexical (target names the element; fresh:true to ask the model)` : "";
         const dedupNote = first?.deduped ? `, ${first.deduped} duplicate controls folded` : "";
-        let header = `URL: ${snap.url}\nJev: ${cands.length} candidates, ${reqs} request${reqs === 1 ? "" : "s"}, ${tok} tok (${model})${retried ? ", retried with page text" : ""}${dedupNote}${memoNote}${lexNote}`;
+        // Who answered and whether its probabilities are real comes first: Claude weighs the percentages by it.
+        const who = first ? providerLine({ provider: first.provider, model, calibrated }) : "no model asked";
+        let header = `URL: ${snap.url}\nTargeting: ${who} · ${cands.length} candidates, ${reqs} request${reqs === 1 ? "" : "s"}, ${tok} tok${retried ? ", retried with page text" : ""}${dedupNote}${memoNote}${lexNote}`;
         header += maybeAutoPin(ctl, snap.tabId) + noteUrl(ctl, snap.url);
-        const detail: any = { targets, results: merged.map((r) => ({ target: r.target, exists: r.exists, confidence: r.confidence, top: r.ranked.slice(0, 3), memo: r.memo ? r.memo.id : undefined, lexical: r.lexical })), tokens: tok, requests: reqs, model, retried, deduped: first?.deduped ?? 0, memoHits: memoHits.size, lexHits: lexHits.size, ms };
+        const detail: any = { targets, results: merged.map((r) => ({ target: r.target, exists: r.exists, confidence: r.confidence, top: r.ranked.slice(0, 3), memo: r.memo ? r.memo.id : undefined, lexical: r.lexical })), tokens: tok, requests: reqs, model, provider: first?.provider, calibrated, retried, deduped: first?.deduped ?? 0, memoHits: memoHits.size, lexHits: lexHits.size, ms };
 
         if (targets.length > 1) {
           const blocks = merged.map((r) => r.exists < THRESHOLDS.exists
@@ -733,16 +744,22 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
           logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: `shortlist:low-confidence:${act}` } });
           return ok(`${header}\nNot acting: confidence ${r.confidence.toFixed(2)} < ${THRESHOLDS.actConfidence}. Pick one yourself:\n${formatShortlist(r.ranked)}${hrefLine}`);
         }
+        // Self-reported probabilities: act only when the model is very sure (config.json targeting.uncalibratedActConfidence).
+        const actMin = targetingConfig().uncalibratedActConfidence;
+        if (!r.calibrated && r.confidence < actMin) {
+          logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: `shortlist:uncalibrated:${act}` } });
+          return ok(`${header}\nNot acting: ${r.provider} gave self-reported probabilities (uncalibrated), and its confidence ${r.confidence.toFixed(2)} is below ${actMin}. Check the shortlist and act with browser_click / browser_fill:\n${formatShortlist(r.ranked)}${hrefLine}`);
+        }
         if (act === "fill") {
           const f = await timed("act", () => callExtension(ctl, "fill", { ref: top.ref, value: p.value }));
           ctl.lastOpMayNavigate = true;
           logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, outcome: "filled", fillValue: redact(p.value) } });
           return ok(`${header}\nFilled [${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}) with ${JSON.stringify(p.value)}.${noteUrl(ctl, f?.url)}\nRunner-up: ${r.ranked[1] ? `[${r.ranked[1].ref}] ${JSON.stringify(r.ranked[1].name)} ${pct(r.ranked[1].p)}` : "none"}.`);
         }
-        const { g, asked } = await timed("guard", () => maybeGuard(top, target, snap.url));
-        if (g >= THRESHOLDS.guard) {
-          logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: g, outcome: "refused:guard" } });
-          return ok(`${header}\nRefusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: it may be irreversible (guard ${pct(g)}). Click it explicitly with browser_click if intended.\n${formatShortlist(r.ranked)}${hrefLine}`);
+        const { g, asked, refuse: guardSays, calibrated: gCal } = await timed("guard", () => maybeGuard(top, target, snap.url));
+        if (guardSays) {
+          logAction({ tab_url: snap.url, tool: "find", value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: g, guardCalibrated: gCal, outcome: "refused:guard" } });
+          return ok(`${header}\nRefusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: it may be irreversible (guard ${pct(g)}${gCal ? "" : ", uncalibrated: only a clear no passes"}). Click it explicitly with browser_click if intended.\n${formatShortlist(r.ranked)}${hrefLine}`);
         }
         const c = await timed("act", () => settledClick(ctl, top.ref));
         logAction({ tab_url: snap.url, tool: "find", ref: top.ref, value: target, ok: true, element_count: r.candidates, detail: { ...detail, guard: asked ? g : "skipped", outcome: "clicked", settled: c?.settled } });
@@ -806,6 +823,7 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
       const trail: string[] = [];
       let tokens = 0, jevMs = 0, settleMs = 0;
       const t0 = performance.now();
+      let who = "";
       const done = async (verdict: string, url: string, tabId?: number) => {
         let tail = "";
         if (p.finalSnapshot) {
@@ -813,7 +831,7 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
         }
         const total = Math.round(performance.now() - t0);
         logAction({ tab_url: url, tool: "pursue", value: goal, ok: true, element_count: trail.length, detail: { goal, verdict, trail, tokens, ms: { total, jev: jevMs, settle: settleMs } } });
-        return ok(`${verdict}\nURL: ${url}\nTrail (${trail.length} step${trail.length === 1 ? "" : "s"}; ${total} ms total, Jev ${Math.round(jevMs)} ms, page settle ${settleMs} ms, ${tokens} Jev tokens):\n${trail.map((t, i) => `  ${i + 1}. ${t}`).join("\n") || "  (none)"}${maybeAutoPin(ctl, tabId)}${tail}${p.finalSnapshot ? "" : "\nbrowser_find / browser_snapshot to continue (pass finalSnapshot:true to get the page inline)."}`);
+        return ok(`${verdict}\nURL: ${url}${who ? `\nTargeting: ${who}` : ""}\nTrail (${trail.length} step${trail.length === 1 ? "" : "s"}; ${total} ms total, Jev ${Math.round(jevMs)} ms, page settle ${settleMs} ms, ${tokens} Jev tokens):\n${trail.map((t, i) => `  ${i + 1}. ${t}`).join("\n") || "  (none)"}${maybeAutoPin(ctl, tabId)}${tail}${p.finalSnapshot ? "" : "\nbrowser_find / browser_snapshot to continue (pass finalSnapshot:true to get the page inline)."}`);
       };
       try {
         let lastClick: any = null;
@@ -832,16 +850,17 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
             history: hops.length ? `Steps already taken toward the goal (do not undo them): ${hops.join(" → ")}. Now on: ${snap.title || snap.url}` : undefined,
             exclude: clickedOn.get(snap.url),
           });
-          jevMs += performance.now() - tj; tokens += r.inputTokens;
+          jevMs += performance.now() - tj; tokens += r.inputTokens + r.outputTokens;
+          who = providerLine(r);
           const top = r.ranked[0];
           if ((r.reached ?? 0) >= THRESHOLDS.reached) return done(`Goal reached (${pct(r.reached!)}) after ${step - 1} click${step === 2 ? "" : "s"}.`, snap.url, snap.tabId);
           if ((r.blocked ?? 0) >= THRESHOLDS.blocked) return done(`Stopped: this page needs a human step (login/CAPTCHA/consent, ${pct(r.blocked!)}).`, snap.url, snap.tabId);
           if (!top || r.exists < THRESHOLDS.exists || r.confidence < THRESHOLDS.stuck)
             return done(`Stuck: no confident next step toward ${JSON.stringify(goal)} (exists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)}). Candidates:\n${formatShortlist(r.ranked)}`, snap.url, snap.tabId);
           const tg = performance.now();
-          const { g, asked } = await maybeGuard(top, goal, snap.url);
+          const { g, asked, refuse } = await maybeGuard(top, goal, snap.url);
           jevMs += performance.now() - tg;
-          if (g >= THRESHOLDS.guard) return done(`Refusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: may be irreversible (guard ${pct(g)}). Do it explicitly with browser_click if intended.`, snap.url, snap.tabId);
+          if (refuse) return done(`Refusing to click [${top.ref}] ${top.role} ${JSON.stringify(top.name)}: may be irreversible (guard ${pct(g)}). Do it explicitly with browser_click if intended.`, snap.url, snap.tabId);
           if (!clickedOn.has(snap.url)) clickedOn.set(snap.url, new Set());
           clickedOn.get(snap.url)!.add(candKey(top));
           hops.push(`clicked ${top.role} ${JSON.stringify(top.name)} on ${snap.title || snap.url}`);
@@ -849,7 +868,8 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
           settleMs += lastClick?.settled?.settledMs ?? 0;
           trail.push(`[${top.ref}] ${top.role} ${JSON.stringify(top.name)} (${pct(top.p)}, conf ${r.confidence.toFixed(2)}${asked ? `, guard ${pct(g)}` : ""}, willReach ${pct(r.willReach ?? 0)}) @ ${snap.url}${fmtSettle(lastClick)}`);
           // Speculative: Jev already judged that this click lands on the goal → skip the confirming snapshot+Jev round trip.
-          if ((r.willReach ?? 0) >= THRESHOLDS.willReach) return done(`Goal reached (predicted ${pct(r.willReach!)} before the click) after ${step} click${step === 1 ? "" : "s"}.`, lastClick?.url ?? snap.url, snap.tabId);
+          // Not on self-reported probabilities: those take the confirming look.
+          if (r.calibrated && (r.willReach ?? 0) >= THRESHOLDS.willReach) return done(`Goal reached (predicted ${pct(r.willReach!)} before the click) after ${step} click${step === 1 ? "" : "s"}.`, lastClick?.url ?? snap.url, snap.tabId);
         }
         const last = await jevSnapshot(ctl, false).catch(() => null);
         return done(`Step limit (${maxSteps}) reached without a confident "goal reached" verdict.`, last?.url ?? lastClick?.url ?? ctl.lastUrl ?? "?", last?.tabId);
@@ -857,6 +877,71 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
     }
     default: return fail(`Unknown op '${op}'`);
   }
+}
+
+// ── Settings page: choosing the targeting provider ─────────────────────────────
+// Only the registered extension's own pages reach these (checked by the caller).
+// A controller (Claude) could otherwise point the base URL at a server it owns and
+// receive every page outline, so neither the provider, the address, the model nor
+// a key can be set over a control connection.
+const SETTINGS_MSGS = new Set(["setJev", "jevStatus", "setJevKey", "removeJevKey", "setTargeting", "setTargetingKey", "removeTargetingKey", "listModels", "testTargeting"]);
+const MODEL_RE = /^[\w.:/@+-]{1,200}$/;
+
+/** Save the provider choice. Returns an error for the Settings page, or undefined. */
+function setTargeting(msg: any): string | undefined {
+  const prev = targetingConfig();
+  if (msg.provider !== "typesafe" && msg.provider !== "openai") return "Unknown provider.";
+  let raw: any = {};
+  try { raw = loadConfig().targeting ?? {}; } catch {}
+  const next: any = { ...(raw && typeof raw === "object" ? raw : {}), provider: msg.provider };
+  if (msg.provider === "openai") {
+    if (!isPreset(msg.preset)) return "Unknown provider.";
+    next.preset = msg.preset;
+    if (msg.preset === "custom") {
+      if (msg.baseUrl !== undefined) {
+        const c = checkBaseUrl(msg.baseUrl);
+        if ("error" in c) return c.error;
+        next.baseUrl = c.url;
+      }
+    } else delete next.baseUrl;
+    if (typeof msg.model === "string") {
+      if (msg.model && !MODEL_RE.test(msg.model)) return "That model name has characters a model id can't have.";
+      next.model = msg.model;
+    } else if (msg.preset !== prev.preset || prev.provider !== "openai") next.model = ""; // another service: its own models
+  }
+  updateConfig({ targeting: next });
+  resetClient();
+  const t = targetingInfo();
+  console.error(`[hub] targeting provider set to ${t.label}${t.model ? ` (${t.model})` : ""}${t.host ? `, ${t.host}` : ""} from the Settings page`);
+  return undefined;
+}
+
+/** Model list and Test run in the background and answer with their own message types. */
+let testing = false;
+function settingsTask(ws: ServerWebSocket<SockData>, type: "listModels" | "testTargeting"): void {
+  const send = (m: object) => { try { ws.send(JSON.stringify(m)); } catch {} };
+  const cfg = targetingConfig();
+  if (type === "listModels") {
+    if (cfg.provider === "typesafe") return send({ type: "models", models: [TYPESAFE_MODEL] });
+    if (!cfg.baseUrl) return send({ type: "models", models: [], error: "Set the API address first." });
+    listModels(cfg.baseUrl, loadKey(cfg.preset, cfg.baseUrl))
+      .then((models) => send({ type: "models", models }), (e) => send({ type: "models", models: [], error: e.message }));
+    return;
+  }
+  if (testing) return send({ type: "targetingTest", ok: false, error: "A test is already running." });
+  let prov;
+  try { prov = buildProvider(cfg); } catch (e: any) { return send({ type: "targetingTest", ok: false, error: e.message }); }
+  testing = true;
+  // Canned pages only (bridge/targeting-tasks.ts): nothing from the person's browser is sent.
+  runTasks(prov, TEST_TASKS).then((runs) => {
+    const failed = runs.find((r) => !r.ok);
+    send({
+      type: "targetingTest", ok: !failed, error: failed?.error, provider: prov.label, model: prov.model, host: prov.host,
+      calibrated: runs.every((r) => r.ok && r.calibrated),
+      rows: runs.map((r) => ({ target: r.task.target, ok: r.ok, correct: r.correct, ms: r.ms, p: r.p, picked: r.picked })),
+    });
+    console.error(`[hub] Settings test: ${runs.filter((r) => r.correct).length}/${runs.length} right on ${prov.label}`);
+  }).finally(() => { testing = false; });
 }
 
 // ── --stop: ask a running hub to exit ─────────────────────────────────────────
@@ -915,7 +1000,23 @@ if (process.argv.includes("--stop")) {
           // pages (popup, Settings). Only the registered extension may ask; a controller (Claude)
           // cannot. The API key travels one way only, from the Settings page into the key file;
           // nothing ever sends it back.
-          if ((msg.type === "setJev" || msg.type === "jevStatus" || msg.type === "setJevKey" || msg.type === "removeJevKey") && ws.data.role === "extension") {
+          if (SETTINGS_MSGS.has(msg.type) && ws.data.role === "extension") {
+            let error: string | undefined;
+            if (msg.type === "listModels" || msg.type === "testTargeting") { settingsTask(ws, msg.type); return; }
+            if (msg.type === "setTargeting") error = setTargeting(msg);
+            if (msg.type === "setTargetingKey" || msg.type === "removeTargetingKey") {
+              const cfg = targetingConfig();
+              if (cfg.provider === "typesafe") msg.type = msg.type === "setTargetingKey" ? "setJevKey" : "removeJevKey"; // same as the old messages
+              else if (msg.type === "removeTargetingKey") {
+                removeKey(cfg.preset); resetClient(); updateConfig({ jev: false });
+                console.error(`[hub] ${PRESETS[cfg.preset].label} API key removed from ${KEYS_FILE} from the Settings page; semantic targeting off`);
+              } else if (typeof msg.key !== "string" || !/^[!-~]{8,512}$/.test(msg.key)) return;
+              else {
+                try { saveKey(cfg.preset, msg.key, cfg.baseUrl); } catch (e) { console.error(`[hub] could not save the key: ${(e as Error).message}`); return; }
+                resetClient(); updateConfig({ jev: true }); // saving a key is the person turning it on
+                console.error(`[hub] ${PRESETS[cfg.preset].label} API key saved to ${KEYS_FILE} from the Settings page; semantic targeting on`);
+              }
+            }
             if (msg.type === "removeJevKey") {
               removeApiKey();
               resetClient();
@@ -936,7 +1037,7 @@ if (process.argv.includes("--stop")) {
               console.error(`[hub] TypeSafe API key saved to ${TYPESAFE_ENV_FILE} from the Settings page; semantic targeting on`);
               if (jevEnabled()) warm();
             }
-            try { ws.send(JSON.stringify({ type: "jev", ...jevState() })); } catch {}
+            try { ws.send(JSON.stringify({ type: "jev", ...jevState(), ...(error ? { error } : {}) })); } catch {}
             return;
           }
           // The person chose "Let Claude switch site": sessions paired with this browser may start over on a new site.
@@ -952,7 +1053,7 @@ if (process.argv.includes("--stop")) {
     });
     TOKEN = ensureToken();
     console.error(`[hub] v${VERSION} listening on ws://127.0.0.1:${WS_PORT}`);
-    console.error(`[hub] semantic targeting (Jev): ${jevEnabled() ? "on — page outlines go to api.typesafe.ai on find/pursue" : "off"}`);
+    { const t = targetingInfo(); console.error(`[hub] semantic targeting (${t.label}${t.model ? ` ${t.model}` : ""}): ${jevEnabled() ? `on — page outlines go to ${t.host || "(no address set)"} on find/pursue` : "off"}`); }
     if (jevEnabled()) warm().then(() => console.error("[hub] jev connection warm")); // first find should not pay the TLS handshake
     // Idle connections go cold in well under a minute (first request after a pause:
     // 650–850 ms vs 270 warm). One cheap ping every 25 s while a browser is attached.
