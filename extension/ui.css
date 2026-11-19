@@ -382,6 +382,29 @@ input[role="switch"]:disabled { opacity: .5; cursor: default; }
 .test-box .field-note { margin-top: 10px; }
 .hint-box { padding: 12px 14px; border: 1px dashed var(--edge); border-radius: 10px; color: var(--ink-2); font-size: 14px; }
 .privacy { margin: 14px 0; color: var(--muted); font-size: 13px; }
+/* Activity: day › Claude session › actions. Colour marks outcome only: grey refused (a limit held), red failed. */
+.act-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 4px; }
+.act-filters .select { min-height: 34px; padding: 5px 8px; font-size: 13.5px; max-width: 220px; }
+.act-filters .btn { margin-left: auto; }
+.check { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; cursor: pointer; }
+.check input { width: 16px; height: 16px; margin: 0; accent-color: var(--ink); }
+.act-day .list-head { margin-top: 22px; }
+.act-session { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.act-head { padding: 9px 14px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.act-head b { color: var(--ink); font-weight: 650; }
+.act-rows { list-style: none; margin: 0; padding: 0 14px; }
+.act-rows li { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13.5px; }
+.act-rows li:first-child { border-top: 0; }
+.act-rows time { color: var(--muted); font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.act-rows .what { overflow-wrap: anywhere; }
+.act-rows small { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; }
+.act-rows .outcome { color: var(--muted); font-size: 12px; font-weight: 600; }
+.act-rows [data-outcome="refused"] .outcome { padding: 0 6px; border-radius: 4px; background: var(--locked-bg); color: var(--locked); }
+.act-rows [data-outcome="error"] .outcome { color: var(--danger); }
+.act-rows [data-outcome="error"] .why { color: var(--danger); }
+.act-rows [data-outcome="refused"] .why { color: var(--ink-2); }
+#actKeep { margin-top: 12px; }
+@media (max-width: 520px) { .act-rows li { grid-template-columns: 52px minmax(0, 1fr) auto; gap: 8px; } }
 .settings footer { display: flex; gap: 20px; align-items: baseline; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 14px; }
 .settings footer .ver { margin-left: auto; color: var(--muted); font: 12px var(--mono); }
 

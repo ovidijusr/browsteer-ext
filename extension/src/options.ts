@@ -1,5 +1,5 @@
 // Settings page (the extension's options page): how long access lasts, where
-// Claude can work, and semantic targeting: which model provider answers (TypeSafe
+// Claude can work, what Claude did (Activity, from the bridge's action log), and semantic targeting: which model provider answers (TypeSafe
 // Jev, nexos.ai, OpenRouter, a local Ollama, a custom address), its model and API
 // key, and a Test. Opened from
 // the popup. The two wide choices are off by default, say their risk before they
@@ -8,6 +8,7 @@ import { ext } from "./ext";
 import { drawIcons } from "./icons";
 import { UPDATE_CMD, getStatus, send, setText, updatePrompt, type Status } from "./keyview";
 import { hostOf } from "./policy";
+import { ALL, andList, applyFilters, browserName, choices, group, readActivity, type ActivityItem, type ActivityReply, type SessionGroup } from "./activity";
 import { MODEL_RE, calibrationText, choiceById, choiceOf, privacyText, type Choice, type TargetingInfo, type TestResult } from "./targeting";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -328,9 +329,118 @@ $("testBtn").addEventListener("click", async () => {
   render(s ?? last);
 });
 
+// ── Activity ─────────────────────────────────────────────────────────────────
+// The bridge words each action; this page asks for the list (only this page may),
+// filters it and groups it by day and by Claude session.
+const ACT_LIMIT = 300;
+let act: ActivityReply | null = null;
+let actState: "idle" | "loading" | "noBridge" | "noAnswer" = "idle";
+let actSig = "";
+async function loadActivity() {
+  if (actState === "loading") return;
+  if (last && !last.connected) { actState = "noBridge"; renderActivity(); return; }
+  actState = "loading";
+  const s = await send("activity", { limit: ACT_LIMIT });
+  const r = readActivity(s?.reply);
+  if (r) act = r;
+  actState = r ? "idle" : s && !s.connected ? "noBridge" : "noAnswer";
+  renderActivity();
+}
+const clockOf = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function fillSelect(sel: HTMLSelectElement, all: string, opts: { value: string; label: string }[]) {
+  const want = JSON.stringify(opts);
+  if (sel.dataset.sig === want) return;
+  const keep = sel.value;
+  sel.replaceChildren(new Option(all, ALL), ...opts.map((o) => new Option(o.label, o.value)));
+  sel.value = opts.some((o) => o.value === keep) ? keep : ALL;
+  sel.dataset.sig = want;
+}
+function renderActivity() {
+  const off = actState === "noBridge" ? "Start the bridge to see what Claude did: run /browse in Claude Code, then come back here."
+    : actState === "noAnswer" && !act ? `The bridge didn't send its activity. If it is older than this extension, ask Claude Code: “${updatePrompt(last?.bridgeDir ?? null)}”`
+    : null;
+  $("actOff").hidden = !off;
+  if (off) setText($("actOff"), off);
+  const items = off ? [] : act?.items ?? [];
+  $("actFilters").hidden = !items.length;
+  const c = choices(items);
+  fillSelect($<HTMLSelectElement>("actBrowser"), "All browsers", c.browsers);
+  fillSelect($<HTMLSelectElement>("actSite"), "All sites", c.sites.map((h) => ({ value: h, label: h })));
+  const f = { browser: $<HTMLSelectElement>("actBrowser").value, site: $<HTMLSelectElement>("actSite").value, problems: $<HTMLInputElement>("actProblems").checked };
+  const shown = applyFilters(items, f);
+  // Redraw only when something changed, so a poll does not move the page under the reader.
+  const sig = JSON.stringify([f, shown.map((i) => i.id), off, act?.now ? Math.floor(act.now / 60_000) : 0]);
+  if (sig === actSig) return;
+  actSig = sig;
+  const empty = off || !act ? null
+    : !items.length ? "Nothing yet. When Claude reads or does something in a browser, it shows up here."
+    : !shown.length ? (f.problems ? "Nothing was refused or failed with these filters." : "No actions match these filters.")
+    : null;
+  $("actEmpty").hidden = !empty;
+  if (empty) $("actEmpty").textContent = empty;
+  $("actList").replaceChildren(...group(shown, act?.now ?? Date.now()).map((d) => {
+    const day = document.createElement("div");
+    day.className = "act-day";
+    const h = document.createElement("h3");
+    h.className = "list-head";
+    h.textContent = d.label;
+    day.append(h, ...d.sessions.map(sessionBlock));
+    return day;
+  }));
+  const keep = act && !off ? `The bridge keeps ${act.keepDays} days of activity, on this computer only.${items.length >= ACT_LIMIT ? ` Showing the latest ${ACT_LIMIT}.` : ""}` : "";
+  $("actKeep").hidden = !keep;
+  $("actKeep").textContent = keep;
+}
+function sessionBlock(g: SessionGroup): HTMLElement {
+  const box = document.createElement("div");
+  box.className = "act-session";
+  const head = document.createElement("p");
+  head.className = "act-head";
+  const when = clockOf(g.first) === clockOf(g.last) ? clockOf(g.last) : `${clockOf(g.first)}–${clockOf(g.last)}`;
+  const who = g.session ? "Claude session" : "Earlier actions";
+  const count = `${g.items.length} action${g.items.length === 1 ? "" : "s"}`;
+  const b = document.createElement("b");
+  b.textContent = who;
+  head.append(b, ` · ${[when, andList(g.browsers), count].filter(Boolean).join(" · ")}`);
+  const list = document.createElement("ol");
+  list.className = "act-rows";
+  list.append(...g.items.map(row));
+  box.append(head, list);
+  return box;
+}
+const OUTCOME = { ok: "OK", refused: "Refused", error: "Failed" } as const;
+function row(i: ActivityItem): HTMLElement {
+  const li = document.createElement("li");
+  li.dataset.outcome = i.outcome;
+  const time = document.createElement("time");
+  time.dateTime = new Date(i.ts).toISOString();
+  time.textContent = clockOf(i.ts);
+  const what = document.createElement("span");
+  what.className = "what";
+  what.append(i.action);
+  const where = document.createElement("small");
+  where.textContent = [i.browser ? browserName(i.browser) : "", i.site].filter(Boolean).join(" · ");
+  what.append(where);
+  if (i.why) {
+    const why = document.createElement("small");
+    why.className = "why";
+    why.textContent = i.why;
+    what.append(why);
+  }
+  const out = document.createElement("span");
+  out.className = "outcome";
+  out.textContent = OUTCOME[i.outcome];
+  li.append(time, what, out);
+  return li;
+}
+for (const id of ["actBrowser", "actSite", "actProblems"]) $(id).addEventListener("change", renderActivity);
+$("actRefresh").addEventListener("click", () => { loadActivity(); });
+
 $("ver").textContent = `v${ext.runtime.getManifest().version}`;
 
 drawIcons();
 const refresh = () => getStatus().then(render);
-refresh();
+refresh().then(loadActivity);
 setInterval(refresh, 1500);
+// New actions show up on their own while the page is open and in front.
+setInterval(() => { if (document.visibilityState === "visible") loadActivity(); }, 10_000);

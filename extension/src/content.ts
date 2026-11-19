@@ -72,6 +72,11 @@ function pulse() {
   return { url: location.href, mutations, ready: document.readyState };
 }
 
+/** What the control is, for the bridge's activity list: its role and name, never its value. */
+function about(el: Element): { role: string; name: string } {
+  return { role: roleOf(el), name: accessibleName(el).slice(0, 80) };
+}
+
 function doClick(ref: number, confirm = false) {
   const el = resolve(ref) as HTMLElement;
   guardClick(el, confirm);
@@ -80,7 +85,7 @@ function doClick(ref: number, confirm = false) {
   const r = el.getBoundingClientRect();
   const x = r.left + r.width / 2, y = r.top + r.height / 2;
   realClick(hitTarget(el, x, y), x, y);
-  return { url: location.href, mutations: before, pulse: true };
+  return { url: location.href, mutations: before, pulse: true, el: about(el) };
 }
 
 // A real click lands on the innermost element under the pointer and bubbles up.
@@ -113,7 +118,7 @@ function doFill(ref: number, value: string) {
   else (el as HTMLInputElement).value = value;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
-  return { url: location.href };
+  return { url: location.href, el: about(ref0) };
 }
 
 // ── Upload ───────────────────────────────────────────────────────────────────
@@ -182,7 +187,7 @@ function doSelect(ref: number, value: string) {
   el.value = match.value;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
-  return { url: location.href, selected: match.text.trim() };
+  return { url: location.href, selected: match.text.trim(), el: about(el) };
 }
 
 function doOptions(ref: number) {
@@ -405,7 +410,7 @@ function handleOp(op: string, params: any): unknown {
       const root = params?.ref != null ? (resolve(params.ref) as Element) : undefined;
       return scan(document, { root, step: params?.step, limit: params?.limit });
     }
-    case "type": return { url: location.href, ...typeInto(resolve(params.ref), String(params.value ?? ""), { commit: !!params.commit }) };
+    case "type": { const el = resolve(params.ref); return { url: location.href, el: about(el), ...typeInto(el, String(params.value ?? ""), { commit: !!params.commit }) }; }
     case "dialogs": return { url: location.href, policy: setDialogPolicy({ confirm: params?.confirm, prompt: params?.prompt }), seen: drainDialogs() };
     case "pulse": return pulse();
     case "fill": return doFill(params.ref, params.value);

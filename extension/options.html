@@ -121,6 +121,21 @@
 
     </section>
 
+    <section id="activity" aria-labelledby="activityHead">
+      <h2 id="activityHead">Activity</h2>
+      <p class="sub">What Claude did in your browsers, newest first. Text Claude typed is never shown, only how long it was.</p>
+      <div class="act-filters" id="actFilters" hidden>
+        <select id="actBrowser" class="select" aria-label="Browser"><option value="">All browsers</option></select>
+        <select id="actSite" class="select" aria-label="Site"><option value="">All sites</option></select>
+        <label class="check"><input type="checkbox" id="actProblems" /> Only refused and failed</label>
+        <button class="btn small" type="button" id="actRefresh">Refresh</button>
+      </div>
+      <p class="hint-box" id="actOff" hidden></p>
+      <div id="actList"></div>
+      <p class="empty" id="actEmpty" hidden></p>
+      <p class="field-note" id="actKeep" hidden></p>
+    </section>
+
     <footer>
       <a href="https://github.com/ovidijusr/browsteer-ext/blob/main/PRIVACY.md" rel="noopener" target="_blank">Privacy</a>
       <a href="https://github.com/ovidijusr/browsteer-ext/blob/main/SECURITY.md" rel="noopener" target="_blank">Security</a>

@@ -10,7 +10,7 @@
 // Persists across sessions so the extension stays paired (no reconnect lag).
 //
 // All logging goes to STDERR (stdout is unused here, but keep the habit).
-import { logAction, upsertFilter, listFilters, deleteFilter, getMemo, saveMemo, bumpMemo, clearMemos, listMemos, pruneMemos, pruneActions, dbFiles, type Memo } from "./db";
+import { actionContext, recentActions, logAction, upsertFilter, listFilters, deleteFilter, getMemo, saveMemo, bumpMemo, clearMemos, listMemos, pruneMemos, pruneActions, dbFiles, type Memo } from "./db";
 import { DATA_DIR, classifyOrigin, ensureToken, extensionAllowed, loadConfig, lockDownDataDir, readToken, redact, resolveSavePath, resolveUploadFile, UPLOAD_MAX_BYTES, sameSite, siteOf, tokenMatches, updateConfig, type Peer } from "./security";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -20,6 +20,7 @@ import { KEYS_FILE, PRESETS, TYPESAFE_MODEL, buildProvider, checkBaseUrl, isPres
 import { TEST_TASKS, runTasks } from "./targeting-tasks";
 import type { ServerWebSocket } from "bun";
 import { VERSION, extensionVersionNote } from "./version";
+import { ACTIVITY_LIMIT, toItem } from "./activity";
 /** The Browsteer folder (the git checkout), where `bun run update` runs. */
 const BRIDGE_DIR = fileURLToPath(new URL("..", import.meta.url)).replace(/[\/]$/, "");
 
@@ -40,6 +41,8 @@ interface Controller {
   noAutoPin: boolean;       // caller explicitly unpinned — don't re-pin behind their back
   lastOpMayNavigate: boolean; // the previous op could legitimately change the URL
   site: string | null;      // the site this session started on; it stays there (see siteCheck)
+  /** Random id that groups this session's rows in the action log (Settings › Activity). */
+  session: string;
 }
 type SockData = { role: "extension" | "control" | null; key: string | null; ctl: Controller | null; peer: Peer; origin: string | null; extVersion: string | null; browserName: string | null };
 type Sock = ServerWebSocket<SockData>;
@@ -54,7 +57,7 @@ let seq = 0;
 const dialogNotes: string[] = [];
 
 function newController(): Controller {
-  return { activeKey: null, paired: new Map(), pinnedTabId: null, lastUrl: null, autoPinned: false, noAutoPin: false, lastOpMayNavigate: false, site: null };
+  return { activeKey: null, paired: new Map(), pinnedTabId: null, lastUrl: null, autoPinned: false, noAutoPin: false, lastOpMayNavigate: false, site: null, session: crypto.randomUUID().slice(0, 8) };
 }
 
 // ── Several browsers in one session ──────────────────────────────────────────
@@ -231,7 +234,7 @@ async function settledClick(ctl: Controller, ref: number | { x: number; y: numbe
     if (reacted && performance.now() - lastChange >= QUIET_MS) break;
     if (!reacted && performance.now() - t0 >= NOREACT_MS) break;
   }
-  return { url, hit: r.hit, settled: { settledMs: Math.round(performance.now() - t0), urlChanged: url !== startUrl, unloading, reacted } };
+  return { url, hit: r.hit, el: r.el, settled: { settledMs: Math.round(performance.now() - t0), urlChanged: url !== startUrl, unloading, reacted } };
 }
 const fmtSettle = (r: any) => r?.settled ? ` settled ${r.settled.settledMs} ms${r.settled.unloading ? ", full navigation" : r.settled.urlChanged ? ", URL changed" : ""}` : "";
 // A click the page ignored is the moment to escalate — say so once, cheaply, instead
@@ -254,7 +257,12 @@ const fail = (text: string): Res => ({ text, isError: true });
 // With more than one browser in a session, its calls run one at a time: a call on
 // another browser swaps the session's tab state, and a parallel call must not see that.
 const queues = new WeakMap<Controller, Promise<unknown>>();
-async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
+/** Every row this op logs carries the session and the browser active when the row is written. */
+const whoFor = (ctl: Controller) => () => ({ session: ctl.session, key: ctl.activeKey, browser: ctl.activeKey ? browsers.get(ctl.activeKey)?.data.browserName ?? null : null, url: ctl.lastUrl });
+function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
+  return actionContext.run(whoFor(ctl), () => execQueued(ctl, op, p));
+}
+async function execQueued(ctl: Controller, op: string, p: any): Promise<Res> {
   if (ctl.paired.size < 2) return execRouted(ctl, op, p);
   const prev = queues.get(ctl) ?? Promise.resolve();
   const run = prev.then(() => execRouted(ctl, op, p), () => execRouted(ctl, op, p));
@@ -430,6 +438,13 @@ async function compare(ctl: Controller, p: any): Promise<Res> {
   return ok(`${top}\n${head.join("\n")}\n\n${body}`);
 }
 
+/** The control's role and name as the content script reported them (extensions with Activity), for the activity list. */
+function elDetail(r: any): { el: { role: string; name: string } } | undefined {
+  const el = r?.el;
+  if (!el || typeof el.role !== "string" || typeof el.name !== "string") return undefined;
+  return { el: { role: el.role.slice(0, 20), name: el.name.slice(0, 80) } };
+}
+
 async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
   // Read the previous op's intent before overwriting it — drift is only
   // suspicious when the op *before* this one couldn't have caused it.
@@ -517,17 +532,17 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
       const confirm = p.confirm === true;
       const r = p.settle === 0 ? await callExtension(ctl, "click", { ...(typeof target === "number" ? { ref: target } : target), confirm }) : await settledClick(ctl, target, p.settle ?? 800, confirm);
       const what = typeof target === "number" ? `[${target}]` : `(${target.x}, ${target.y})${r?.hit ? ` → ${r.hit}` : ""}`;
-      logAction({ tab_url: r?.url, tool: "click", ref: typeof target === "number" ? target : null, value: typeof target === "number" ? undefined : `${target.x},${target.y}`, ok: true });
+      logAction({ tab_url: r?.url, tool: "click", ref: typeof target === "number" ? target : null, value: typeof target === "number" ? undefined : `${target.x},${target.y}`, ok: true, detail: elDetail(r) });
       return ok(`Clicked ${what}.${fmtSettle(r)} Re-snapshot to see the result.${deadClickHint(r)}${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`);
     } catch (e: any) { logAction({ tool: "click", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
     case "fill": try {
       if (p.type) {
         const r = await callExtension(ctl, "type", { ref: p.ref, value: p.value, commit: p.commit });
-        logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: redact(p.value), ok: r.stuck, detail: { how: r.how } });
+        logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: redact(p.value), ok: r.stuck, detail: { how: r.how, ...elDetail(r) } });
         return ok(`Typed into [${p.ref}] ${r.field} via ${r.how}: value now ${JSON.stringify(r.value)}${r.stuck ? "" : " ⚠ differs from what was typed"}.${noteUrl(ctl, r?.url)}`);
       }
       const r = await callExtension(ctl, "fill", { ref: p.ref, value: p.value });
-      logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: redact(p.value), ok: true });
+      logAction({ tab_url: r?.url, tool: "fill", ref: p.ref, value: redact(p.value), ok: true, detail: elDetail(r) });
       return ok(`Filled [${p.ref}] with ${JSON.stringify(p.value)}.${noteUrl(ctl, r?.url)}`);
     } catch (e: any) { logAction({ tool: "fill", ref: p.ref, value: redact(p.value), ok: false, error: e.message }); return fail(e.message); }
     case "scan": try {
@@ -560,7 +575,7 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
       logAction({ tab_url: r?.url, tool: "upload", ref: p.ref, value: list, ok: true, detail: { how: r.how } });
       return ok(`Uploaded ${list} to [${p.ref}] (${r.how}). Re-snapshot to see what the page did with it.${maybeAutoPin(ctl, r?.tabId)}${noteUrl(ctl, r?.url)}`);
     } catch (e: any) { logAction({ tool: "upload", ref: p.ref ?? null, ok: false, error: e.message }); return fail(e.message); }
-    case "select": try { const r = await callExtension(ctl, "select", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "select", ref: p.ref, value: p.value, ok: true }); return ok(`Selected "${r.selected}" in [${p.ref}].${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "select", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
+    case "select": try { const r = await callExtension(ctl, "select", { ref: p.ref, value: p.value }); logAction({ tab_url: r?.url, tool: "select", ref: p.ref, value: p.value, ok: true, detail: elDetail(r) }); return ok(`Selected "${r.selected}" in [${p.ref}].${noteUrl(ctl, r?.url)}`); } catch (e: any) { logAction({ tool: "select", ref: p.ref, value: p.value, ok: false, error: e.message }); return fail(e.message); }
     case "options": try { const r = await callExtension(ctl, "options", { ref: p.ref }); logAction({ tool: "options", ref: p.ref, ok: true }); return ok(r.options.join("\n")); } catch (e: any) { return fail(e.message); }
     case "read": try { const r = await callExtension(ctl, "read", { ref: p.ref }); logAction({ tab_url: r?.url, tool: "read", ref: p.ref, ok: true }); return ok(r.text ?? ""); } catch (e: any) { logAction({ tool: "read", ref: p.ref, ok: false, error: e.message }); return fail(e.message); }
     case "navigate":
@@ -1038,6 +1053,17 @@ if (process.argv.includes("--stop")) {
               if (jevEnabled()) warm();
             }
             try { ws.send(JSON.stringify({ type: "jev", ...jevState(), ...(error ? { error } : {}) })); } catch {}
+            return;
+          }
+          // Settings › Activity: the action log in plain words (bridge/activity.ts). Only the
+          // registered extension may ask; a controller (Claude) gets nothing back.
+          if (msg.type === "activity" && ws.data.role === "extension") {
+            const keepMs = loadConfig().logDays * 86_400_000;
+            const since = Math.max(Number.isFinite(msg.since) ? Number(msg.since) : 0, Date.now() - keepMs);
+            const limit = Math.min(Math.max(1, Number.isInteger(msg.limit) ? msg.limit : ACTIVITY_LIMIT.default), ACTIVITY_LIMIT.max);
+            let items: ReturnType<typeof toItem>[] = [];
+            try { items = recentActions(since, limit).map((r) => toItem(r, ws.data.key)); } catch (e) { console.error(`[hub] activity: ${(e as Error).message}`); }
+            try { ws.send(JSON.stringify({ type: "activity", items, keepDays: loadConfig().logDays, browser: ws.data.browserName, now: Date.now() })); } catch {}
             return;
           }
           // The person chose "Let Claude switch site": sessions paired with this browser may start over on a new site.

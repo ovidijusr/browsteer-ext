@@ -929,3 +929,109 @@ describe("compare", () => {
     expect(opsSeen.edge).toEqual([]);
   });
 });
+
+// Settings › Activity: the action log in plain words, for the registered extension only.
+describe("activity", () => {
+  const KEYA = "bst-actv-edge-0001";
+  let b: WebSocket;
+  let c: WebSocket;
+  const heard: any[] = [];
+  const waiting = new Map<string, (m: any) => void>();
+  let n = 0;
+  const call = (op: string, params: Record<string, unknown> = {}): Promise<{ ok: boolean; text: string }> => {
+    const id = `a-${++n}`;
+    return new Promise((res) => { waiting.set(id, res); c.send(JSON.stringify({ id, op, params })); });
+  };
+  const PAGE = "https://acts.example/form?token=SECRET123#frag";
+  const answer = (op: string): any => {
+    if (op === "click") return { url: PAGE, tabId: 3, el: { role: "button", name: "Save" } };
+    if (op === "fill") return { url: PAGE, tabId: 3, el: { role: "textbox", name: "Email" } };
+    if (op === "read") throw new Error("Browsteer is locked in this browser. Ask the user to open the page and allow it.");
+    if (op === "html") throw new Error("Extension timed out after 15000ms on 'html'.");
+    return { url: PAGE, tabId: 3 };
+  };
+  /** Ask as an extension socket; the hub's {type:"activity"} answer, or null. */
+  async function activityFrom(sock: WebSocket, list: any[], msg: object = { type: "activity" }): Promise<any> {
+    const before = list.length;
+    sock.send(JSON.stringify(msg));
+    for (let i = 0; i < 40 && !list.slice(before).some((m) => m.type === "activity"); i++) await Bun.sleep(25);
+    return list.slice(before).find((m) => m.type === "activity") ?? null;
+  }
+
+  beforeAll(async () => {
+    b = asExtension();
+    await waitOpen(b);
+    b.onmessage = (ev) => {
+      const req = JSON.parse(String(ev.data));
+      if (req.type) { heard.push(req); return; }
+      try { b.send(JSON.stringify({ id: req.id, ok: true, result: answer(req.op) })); }
+      catch (e: any) { b.send(JSON.stringify({ id: req.id, ok: false, error: e.message })); }
+    };
+    b.send(JSON.stringify({ type: "register", key: KEYA, browser: "edge" }));
+    c = new WebSocket(wsUrl());
+    await waitOpen(c);
+    c.onmessage = (ev) => { const m = JSON.parse(String(ev.data)); heard.push({ ...m, fromHubToController: true }); waiting.get(m.id)?.(m); waiting.delete(m.id); };
+    c.send(JSON.stringify({ type: "hello", role: "control", token: token() }));
+    await Bun.sleep(100);
+    expect((await call("pair", { key: KEYA })).ok).toBe(true);
+    await call("navigate", { url: "https://acts.example/next?session=SECRET456" });
+    await call("click", { ref: 4, settle: 0 });
+    await call("fill", { ref: 2, value: "hunter2-secret" });
+    await call("read", { ref: 9 });
+    await call("html", {});
+  });
+  afterAll(() => { for (const s of [b, c]) try { s.close(); } catch {} });
+
+  test("the registered extension gets the actions in plain words, newest first", async () => {
+    const r = await activityFrom(b, heard);
+    expect(r).not.toBe(null);
+    expect(r.keepDays).toBe(30);
+    const mine = r.items.filter((i: any) => i.site?.startsWith("acts.example"));
+    expect(mine.map((i: any) => i.action)).toEqual([
+      "Read the page's HTML",
+      "Read the text of [9]",
+      "Filled [2] textbox “Email” (14 characters)",
+      "Clicked [4] button “Save”",
+      "Opened the page",
+    ]);
+    expect(mine.map((i: any) => i.outcome)).toEqual(["error", "refused", "ok", "ok", "ok"]);
+    expect(mine[0].why).toBe("The page didn't answer in time");
+    expect(mine[1].why).toBe("Access was locked");
+    expect(mine[3].site).toBe("acts.example/form");
+  });
+
+  test("each row names the browser and the session; the asking browser is marked", async () => {
+    const r = await activityFrom(b, heard);
+    const mine = r.items.filter((i: any) => i.site?.startsWith("acts.example"));
+    expect(new Set(mine.map((i: any) => i.browser))).toEqual(new Set(["edge"]));
+    expect(mine.every((i: any) => i.thisBrowser)).toBe(true);
+    const sessions = new Set(mine.map((i: any) => i.session));
+    expect(sessions.size).toBe(1);
+    const other = r.items.find((i: any) => i.session && !sessions.has(i.session));
+    expect(other).toBeTruthy(); // the earlier tests' session is a different one
+    expect(other.thisBrowser).toBe(false);
+  });
+
+  test("no typed text, query string or fragment is ever sent", async () => {
+    const r = await activityFrom(b, heard);
+    const json = JSON.stringify(r);
+    for (const secret of ["hunter2", "SECRET123", "SECRET456", "token=", "#frag", KEYA, KEY]) expect(json).not.toContain(secret);
+  });
+
+  test("limit is honoured", async () => {
+    const r = await activityFrom(b, heard, { type: "activity", limit: 2 });
+    expect(r.items.length).toBe(2);
+  });
+
+  test("a controller cannot ask for it, even with the token", async () => {
+    const before = heard.length;
+    c.send(JSON.stringify({ type: "activity" }));
+    await Bun.sleep(200);
+    expect(heard.slice(before).some((m) => m.type === "activity")).toBe(false);
+  });
+
+  test("an extension socket that has not registered cannot ask for it", async () => {
+    const r = await knock(asExtension(), { type: "activity" });
+    expect(r.silent).toBe(true);
+  });
+});

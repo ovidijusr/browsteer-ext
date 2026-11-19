@@ -259,7 +259,7 @@ function connect() {
       return;
     }
     if ((req as any).type === "registered") { refused = null; hubVersion = typeof (req as any).hubVersion === "string" ? (req as any).hubVersion : null; bridgeDir = typeof (req as any).dir === "string" ? (req as any).dir : null; jev = readJev((req as any).jev); return; }
-    if ((req as any).type === "jev" || (req as any).type === "models" || (req as any).type === "targetingTest") {
+    if ((req as any).type === "jev" || (req as any).type === "models" || (req as any).type === "targetingTest" || (req as any).type === "activity") {
       if ((req as any).type === "jev") jev = readJev(req);
       hubWaiters.get((req as any).type)?.splice(0).forEach((f) => f(req));
       return;
@@ -477,6 +477,14 @@ ext.runtime.onMessage.addListener((msg: any, sender: any, send: (r: unknown) => 
       if (!out) return reply();
       const r = REPLY[msg.type];
       return reply(() => askHub(out, r.type, r.ms));
+    }
+    // Settings › Activity: the bridge's action log in plain words. Asked for by the Settings
+    // page only, and answered to it only; a controller (Claude) cannot ask the bridge for it.
+    case "activity": {
+      if (!String(sender?.url ?? "").startsWith(ext.runtime.getURL("options.html"))) return false;
+      const since = Number.isFinite(msg.since) ? Math.max(0, Number(msg.since)) : 0;
+      const limit = Number.isInteger(msg.limit) ? Math.min(Math.max(1, msg.limit), 1000) : 300;
+      return reply(() => askHub({ type: "activity", since, limit }, "activity", 4000));
     }
     case "unlockSite": return reply(() => { if (ws?.readyState === WebSocket.OPEN) ws.send('{"type":"unlock"}'); });
     case "finishSetup": return reply(() => ext.storage.local.set({ setupDone: true }));

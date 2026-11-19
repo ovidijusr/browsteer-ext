@@ -209,6 +209,15 @@ won't. `bun run bench:targeting` compares providers on labelled tasks; see
 While it is off, `browser_find` still finds controls named exactly and ones it
 has learned before, without any network call.
 
+## See what Claude did
+
+**Settings › Activity** lists what Claude read and did, newest first, grouped by
+day and by Claude Code session: the time, the browser, the site, the action in
+plain words ("Clicked [12] button “Save”", "Filled [3] textbox “Email” (8
+characters)") and whether it worked, was refused, or failed. Filter by browser,
+by site, or to refusals and failures only. It comes from the bridge's local log
+(30 days); typed text is never shown, only its length.
+
 ## Stop
 
 - **Stop now** in the popup closes access at once.

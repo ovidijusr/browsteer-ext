@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -29,15 +30,27 @@ db.exec(`
     element_count INTEGER
   );
 `);
-// Added later: JSON blob for Jev verdicts (find/pursue) — the threshold-tuning data.
-if (!db.query<{ name: string }, []>("PRAGMA table_info(actions)").all().some((c) => c.name === "detail")) {
-  db.exec("ALTER TABLE actions ADD COLUMN detail TEXT");
+// Added later: `detail`, a JSON blob for Jev verdicts (find/pursue), the threshold-tuning
+// data; then `browser`, `browser_key` and `session` (with Settings › Activity), so the Settings page can
+// say which browser and which Claude session each action came from.
+{
+  const have = new Set(db.query<{ name: string }, []>("PRAGMA table_info(actions)").all().map((c) => c.name));
+  for (const col of ["detail", "browser", "browser_key", "session"]) if (!have.has(col)) db.exec(`ALTER TABLE actions ADD COLUMN ${col} TEXT`);
 }
+db.exec("CREATE INDEX IF NOT EXISTS actions_ts ON actions (ts)");
 
 const insert = db.prepare(
-  `INSERT INTO actions (ts, tab_url, tool, ref, value, ok, error, element_count, detail)
-   VALUES ($ts, $tab_url, $tool, $ref, $value, $ok, $error, $element_count, $detail)`
+  `INSERT INTO actions (ts, tab_url, tool, ref, value, ok, error, element_count, detail, browser, browser_key, session)
+   VALUES ($ts, $tab_url, $tool, $ref, $value, $ok, $error, $element_count, $detail, $browser, $browser_key, $session)`
 );
+
+/** Who an action is for: the Claude session, the browser active when the row is written, and
+ *  the page that session last saw (the address for a failed action, which has none of its own). */
+export interface ActionWho { session: string | null; key: string | null; browser: string | null; url?: string | null }
+/** The hub runs each op inside this, so every logAction in it knows its session and browser
+ *  without each call site passing them. A function, read when the row is written: a compare
+ *  switches browsers in the middle of one op. */
+export const actionContext = new AsyncLocalStorage<() => ActionWho>();
 
 export interface ActionRecord {
   tab_url?: string | null;
@@ -51,10 +64,11 @@ export interface ActionRecord {
 }
 
 export function logAction(a: ActionRecord): void {
+  const who = actionContext.getStore()?.();
   insert.run({
     // Date.now() is intentional here — this is the bridge runtime, not a workflow script.
     $ts: Date.now(),
-    $tab_url: a.tab_url ?? null,
+    $tab_url: a.tab_url ?? who?.url ?? null,
     $tool: a.tool,
     $ref: a.ref ?? null,
     $value: a.value ?? null,
@@ -62,7 +76,23 @@ export function logAction(a: ActionRecord): void {
     $error: a.error ?? null,
     $element_count: a.element_count ?? null,
     $detail: a.detail == null ? null : JSON.stringify(a.detail),
+    $browser: who?.browser ?? null,
+    $browser_key: who?.key ?? null,
+    $session: who?.session ?? null,
   });
+}
+
+export interface ActionRow {
+  id: number; ts: number; tab_url: string | null; tool: string; ref: number | null; value: string | null;
+  ok: number; error: string | null; element_count: number | null; detail: string | null;
+  browser: string | null; browser_key: string | null; session: string | null;
+}
+const recentStmt = db.query<ActionRow, { $since: number; $limit: number }>(
+  `SELECT * FROM actions WHERE ts >= $since ORDER BY ts DESC, id DESC LIMIT $limit`
+);
+/** The newest action-log rows since `since` (ms), newest first. */
+export function recentActions(since: number, limit: number): ActionRow[] {
+  return recentStmt.all({ $since: since, $limit: limit });
 }
 
 // ── Pruning filters (Phase 2) ─────────────────────────────────────────────────

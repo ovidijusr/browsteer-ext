@@ -32,6 +32,31 @@
     ],
   };
 
+  // Settings › Activity, as the bridge words it (bridge/activity.ts). Times are relative to now.
+  const at = (min) => Date.now() - min * 60_000;
+  const DAY = 24 * 60;
+  const item = (id, min, browser, session, site, action, outcome = "ok", why = null) =>
+    ({ id, ts: at(min), browser, thisBrowser: browser === "edge", session, site, action, outcome, why });
+  const ACTIVITY = [
+    item(40, 2, "edge", "a1b2c3d4", "github.com/acme/site/settings", "Clicked [31] button “Save changes”"),
+    item(39, 3, "edge", "a1b2c3d4", "github.com/acme/site/settings", "Filled [12] textbox “Description” (48 characters)"),
+    item(38, 3, "edge", "a1b2c3d4", "github.com/acme/site/settings", "Didn't click “Delete this repository”", "refused", "Needs your OK first"),
+    item(37, 4, "edge", "a1b2c3d4", "github.com/acme/site/settings", "Read the page"),
+    item(36, 5, "edge", "a1b2c3d4", "github.com/acme/site", "Opened the page"),
+    item(35, 6, "edge", "a1b2c3d4", "mail.example.com/inbox", "Read the page", "refused", "Outside the session's site"),
+    item(34, 7, "edge", "a1b2c3d4", "github.com/acme/site/pulls", "Read the page"),
+    item(30, 52, "firefox", "e5f6a7b8", "linear.app/acme/issue/ENG-212", "Chose an option in [8] combobox “Status”"),
+    item(29, 53, "firefox", "e5f6a7b8", "linear.app/acme/issue/ENG-212", "Clicked [44] button “Assign to me”", "error", "The element was gone"),
+    item(28, 53, "firefox", "e5f6a7b8", "linear.app/acme/issue/ENG-212", "Read the page"),
+    item(27, 55, "firefox", "e5f6a7b8", "linear.app/acme/team/ENG", "Found and clicked “the ENG-212 issue” [19]"),
+    item(20, DAY + 30, "edge", "c9d0e1f2", "shop.example/checkout", "Compared 2 browsers"),
+    item(19, DAY + 31, "firefox", "c9d0e1f2", "shop.example/checkout", "Typed into [5] textbox “Postcode” (6 characters)"),
+    item(18, DAY + 32, "edge", "c9d0e1f2", "shop.example/checkout", "Pressed Enter in [5]"),
+    item(17, DAY + 33, "edge", "c9d0e1f2", "shop.example/cart", "Read the form"),
+    item(10, 3 * DAY + 70, null, null, "docs.example.org/guide/install", "Read the page"),
+    item(9, 3 * DAY + 72, null, null, "docs.example.org/guide", "Read the page's text", "error", "The page didn't answer in time"),
+  ];
+
   const base = () => ({
     key: "bst-ab12-cd34-ef56",
     connected: true,
@@ -87,6 +112,11 @@
     "jev-on": (s) => { s.settings.armedUntil = soon; s.settings.allow = ["github.com"]; s.jev = { on: true, keyPresent: true, envOverride: false, targeting: provider("typesafe") }; },
     "jev-no-key": (s) => { s.settings.armedUntil = soon; s.settings.allow = ["github.com"]; s.jev = { on: true, keyPresent: false, envOverride: false, targeting: provider("typesafe") }; },
     picked: (s) => { s.settings.armedUntil = soon; s.settings.allow = ["github.com"]; },
+    // Settings › Activity: canned actions over three days, two browsers, refusals and failures.
+    activity: (s) => { s.settings.armedUntil = soon; s.settings.allow = ["github.com", "linear.app", "shop.example"]; },
+    "activity-empty": (s) => { s.settings.armedUntil = soon; s.settings.allow = ["github.com"]; },
+    // A bridge from before Activity: it never answers the request.
+    "activity-old-bridge": (s) => { s.hubVersion = "2.1.0"; s.settings.armedUntil = soon; s.settings.allow = ["github.com"]; },
     "setup-done":(s) => { s.settings.armedUntil = soon; s.settings.allow = ["github.com", "linear.app"]; s.settings.block = ["mybank.example"]; },
   };
 
@@ -162,6 +192,10 @@
       case "regenerate": state.key = "bst-pq4r-mn8s-tv2w"; break;
       case "setJev": if (state.jev) state.jev.on = msg.value === true; break;
       case "finishSetup": state.setupDone = true; break;
+      case "activity":
+        if (!state.connected || name === "activity-old-bridge") break;
+        reply = { type: "activity", items: name === "activity" ? ACTIVITY : [], keepDays: 30, browser: "edge", now: Date.now() };
+        break;
     }
     return reply ? { ...status(), reply } : status();
   }
