@@ -855,7 +855,7 @@ async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {
           const top = r.ranked[0];
           if ((r.reached ?? 0) >= THRESHOLDS.reached) return done(`Goal reached (${pct(r.reached!)}) after ${step - 1} click${step === 2 ? "" : "s"}.`, snap.url, snap.tabId);
           if ((r.blocked ?? 0) >= THRESHOLDS.blocked) return done(`Stopped: this page needs a human step (login/CAPTCHA/consent, ${pct(r.blocked!)}).`, snap.url, snap.tabId);
-          if (!top || r.exists < THRESHOLDS.exists || r.confidence < THRESHOLDS.stuck)
+          if (!top || r.exists < THRESHOLDS.exists || r.confidence < (r.calibrated ? THRESHOLDS.stuck : THRESHOLDS.stuckUncalibrated))
             return done(`Stuck: no confident next step toward ${JSON.stringify(goal)} (exists ${pct(r.exists)}, confidence ${r.confidence.toFixed(2)}). Candidates:\n${formatShortlist(r.ranked)}`, snap.url, snap.tabId);
           const tg = performance.now();
           const { g, asked, refuse } = await maybeGuard(top, goal, snap.url);

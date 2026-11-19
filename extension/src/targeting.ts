@@ -32,7 +32,7 @@ export interface Choice {
 }
 export const CHOICES: Choice[] = [
   { id: "typesafe", label: "TypeSafe Jev", baseUrl: "https://api.typesafe.ai", keyUrl: "https://console.typesafe.ai/keys", keyWhere: "console.typesafe.ai/keys" },
-  { id: "nexos", label: "nexos.ai", baseUrl: "https://api.nexos.ai/v1", keyWhere: "your nexos.ai workspace, under API keys" },
+  { id: "nexos", label: "nexos.ai", baseUrl: "https://api.nexos.ai/v1", keyWhere: "the nexos.ai app: Gateway › API Keys › Generate API Key" },
   { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", keyUrl: "https://openrouter.ai/keys", keyWhere: "openrouter.ai/keys" },
   { id: "ollama", label: "Local (Ollama)", baseUrl: "http://127.0.0.1:11434/v1" },
   { id: "custom", label: "Custom", baseUrl: "" },

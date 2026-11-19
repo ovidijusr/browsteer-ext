@@ -13,7 +13,7 @@ export type JevState = {
   keyPresent: boolean;
   /** BROWSTEER_JEV is set where the bridge runs, which overrides the saved setting. */
   envOverride: boolean;
-  /** Which model answers (null from bridges before 2.2.0, which only know TypeSafe). */
+  /** Which model answers (null from bridges before 2.1.0, which only know TypeSafe). */
   targeting: TargetingInfo | null;
 };
 

@@ -26,7 +26,7 @@ async function save(type: string, extra: Record<string, unknown> = {}): Promise<
   render(s);
   return s;
 }
-/** Bridges from 2.2.0 take the provider-aware key messages; older ones only know TypeSafe's. */
+/** Bridges from 2.1.0 take the provider-aware key messages; older ones only know TypeSafe's. */
 const newBridge = () => !!last?.jev?.targeting;
 
 function render(s: Status | null) {
@@ -79,7 +79,7 @@ function renderJev(s: Status) {
     : null;
   $("jevOff").hidden = !off;
   if (off) setText($("jevOff"), off);
-  // Bridges before 2.2.0 know only TypeSafe: no picker, everything else as before.
+  // Bridges before 2.1.0 know only TypeSafe: no picker, everything else as before.
   const t = s.jev?.targeting ?? null;
   $("providerBlock").hidden = !!off || !t;
   setText($("privacy"), privacyText(t));
