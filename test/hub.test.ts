@@ -653,3 +653,153 @@ describe("several browsers", () => {
     expect(ops2.filter((o) => o === "snapshot").length).toBe(1);
   });
 });
+
+// browser_compare: the same steps in each paired browser, then only what differs.
+// Its own session and two fake browsers, so the state above does not leak in.
+describe("compare", () => {
+  const EDGE = "bst-cmpa-edge-0001", FOX = "bst-cmpb-fire-0002";
+  type Answer = (op: string, params: any) => any;
+  const sockets: WebSocket[] = [];
+  const opsSeen: Record<string, string[]> = { edge: [], firefox: [] };
+  const answers: Record<string, Answer> = {};
+  const page = (form: string, extra: Record<string, unknown> = {}) => (op: string): any => {
+    if (op === "form") return { url: "https://shop.example/checkout", tabId: 5, title: "Checkout", count: 3, problems: 0, text: form, ...extra };
+    if (op === "snapshot") return { url: "https://shop.example/checkout", tabId: 5, count: 2, tree: 'main\n  heading "Checkout"\n  "Total: €42.00"\n  [1] button "Pay"', ...extra };
+    return { url: "https://shop.example/checkout", tabId: 5 };
+  };
+  const FORM = 'form#pay\n  [1] textbox "Email" (email) = "a@b.c" *required\n  [2] combobox "Country" = "Lithuania" [LT]\n  [3] checkbox "Terms" *checked\n  → submit [4] "Pay"';
+
+  async function fakeBrowser(key: string, name: string) {
+    const s = asExtension();
+    await waitOpen(s);
+    s.onmessage = (ev) => {
+      const req = JSON.parse(String(ev.data));
+      if (req.type) return;
+      opsSeen[name].push(req.op);
+      try { s.send(JSON.stringify({ id: req.id, ok: true, result: answers[name](req.op, req.params) })); }
+      catch (e: any) { s.send(JSON.stringify({ id: req.id, ok: false, error: e.message })); }
+    };
+    s.send(JSON.stringify({ type: "register", key, browser: name }));
+    sockets.push(s);
+  }
+
+  let c: WebSocket;
+  const waiting = new Map<string, (m: any) => void>();
+  let n = 0;
+  const call = (op: string, params: Record<string, unknown> = {}): Promise<{ ok: boolean; text: string }> => {
+    const id = `c-${++n}`;
+    return new Promise((res) => { waiting.set(id, res); c.send(JSON.stringify({ id, op, params })); });
+  };
+
+  beforeAll(async () => {
+    answers.edge = page(FORM); answers.firefox = page(FORM);
+    await fakeBrowser(EDGE, "edge");
+    await fakeBrowser(FOX, "firefox");
+    c = new WebSocket(wsUrl());
+    await waitOpen(c);
+    c.onmessage = (ev) => { const m = JSON.parse(String(ev.data)); waiting.get(m.id)?.(m); waiting.delete(m.id); };
+    c.send(JSON.stringify({ type: "hello", role: "control", token: token() }));
+    await Bun.sleep(100);
+  });
+  afterAll(() => { for (const s of [...sockets, c]) try { s.close(); } catch {} });
+
+  test("needs two paired browsers, and names only the session's own", async () => {
+    expect((await call("pair", { key: EDGE })).ok).toBe(true);
+    const r = await call("compare", {});
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain("two or more paired browsers");
+    expect(r.text).not.toContain(FOX);
+    expect(r.text).not.toContain(KEY);
+    const unknown = await call("compare", { browsers: ["edge", "firefox"] });
+    expect(unknown.ok).toBe(false);
+    expect(unknown.text).toContain("No paired browser 'firefox'");
+    expect(unknown.text).not.toContain(FOX);
+  });
+
+  test("the same page in both says so", async () => {
+    expect((await call("pair", { key: FOX })).ok).toBe(true);
+    const r = await call("compare", {});
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain("Compared 2 browsers (form)");
+    expect(r.text).toContain("Same in all 2 browsers: URL (https://shop.example/checkout), title, form");
+    expect(r.text).not.toContain("Differences");
+  });
+
+  test("ref numbers differing between browsers is not a difference", async () => {
+    answers.firefox = page(FORM.replace(/\[(\d)\]/g, (_, d) => `[${Number(d) + 10}]`));
+    const r = await call("compare", {});
+    expect(r.text).toContain("Same in all 2 browsers");
+  });
+
+  test("runs the steps in each browser and diffs the form field by field", async () => {
+    opsSeen.edge.length = 0; opsSeen.firefox.length = 0;
+    answers.firefox = page(FORM
+      .replace('= "a@b.c" *required', '= "a@b.c" *required ⚠ "Enter a valid email"')
+      .replace('"Pay"', '"Pay" *disabled'), { title: "Checkout – Shop" });
+    const r = await call("compare", { steps: [{ navigate: "https://shop.example/checkout" }, { press: "Tab" }] });
+    expect(r.ok).toBe(true);
+    for (const b of ["edge", "firefox"]) {
+      expect(opsSeen[b]).toContain("navigate");
+      expect(opsSeen[b]).toContain("press");
+      expect(opsSeen[b]).toContain("form");
+    }
+    expect(r.text).toMatch(/edge \(bst-cmpa-edge-0001\): Done: 2 steps/);
+    expect(r.text).toMatch(/firefox \(bst-cmpb-fire-0002\): Done: 2 steps/);
+    expect(r.text).toContain("Differences (edge vs firefox)");
+    expect(r.text).toContain('textbox "Email" (email)');
+    expect(r.text).toContain('⚠ "Enter a valid email"');
+    expect(r.text).toContain('→ submit "Pay"');
+    expect(r.text).toContain("*disabled");
+    expect(r.text).toContain("Checkout – Shop");
+    // Fields that agree are not listed.
+    expect(r.text).not.toContain('combobox "Country"');
+    expect(r.text).toContain("Same in all 2 browsers: URL");
+  });
+
+  test("check:'text' adds the page text, showing only lines one browser lacks", async () => {
+    answers.firefox = (op) => op === "snapshot"
+      ? { url: "https://shop.example/checkout", tabId: 5, count: 1, tree: 'main\n  heading "Checkout"\n  "Total: €41.00"\n  [1] button "Pay"' }
+      : page(FORM)(op);
+    answers.edge = page(FORM);
+    const r = await call("compare", { check: "text" });
+    expect(r.text).toContain("text (2 lines differ)");
+    expect(r.text).toContain('"Total: €42.00"  — only in edge');
+    expect(r.text).toContain('"Total: €41.00"  — only in firefox');
+    expect(r.text).not.toContain('heading "Checkout"  —');
+    expect(r.text).toContain("Same in all 2 browsers: URL (https://shop.example/checkout), title, form");
+  });
+
+  test("a browser that refuses is reported as refusing, not as a difference", async () => {
+    answers.edge = page(FORM);
+    answers.firefox = () => { throw new Error("Browsteer is locked in this browser. Ask the user to open the page, click the Browsteer button and choose “Allow Claude on …” for that site."); };
+    const r = await call("compare", {});
+    expect(r.ok).toBe(false);
+    expect(r.text).toMatch(/firefox \(bst-cmpb-fire-0002\): refused — Browsteer is locked/);
+    expect(r.text).toContain("Nothing to compare: only edge answered");
+    expect(r.text).not.toContain("Differences");
+  });
+
+  test("a refusal during the steps stops that browser only", async () => {
+    answers.firefox = (op) => { if (op === "navigate") throw new Error("shop.example is not on the user's allowed list. Ask the user to open that page, then choose “Allow Claude on shop.example” in the Browsteer popup."); return page(FORM)(op); };
+    opsSeen.firefox.length = 0;
+    const r = await call("compare", { steps: [{ navigate: "https://shop.example/checkout" }] });
+    expect(r.text).toMatch(/firefox \(bst-cmpb-fire-0002\): refused \(Stopped at step 1 of 1[^)]*\) — shop\.example is not on the user's allowed list/);
+    expect(opsSeen.firefox).not.toContain("form");
+  });
+
+  test("the session's site lock covers every browser", async () => {
+    answers.firefox = page(FORM, { url: "https://mail.other.test/inbox" });
+    answers.edge = page(FORM);
+    const r = await call("compare", {});
+    expect(r.text).toMatch(/firefox \(bst-cmpb-fire-0002\): refused — This session is locked to shop\.example/);
+    expect(r.text).not.toContain("mail.other.test/inbox");
+  });
+
+  test("afterwards the default browser is the one it was before", async () => {
+    answers.edge = page(FORM); answers.firefox = page(FORM);
+    opsSeen.edge.length = 0; opsSeen.firefox.length = 0;
+    await call("form", {});
+    expect(opsSeen.firefox).toContain("form");
+    expect(opsSeen.edge).toEqual([]);
+  });
+});

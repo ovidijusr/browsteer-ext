@@ -76,8 +76,12 @@ and Firefox:
 /browse bst-ab12-cd34-ef56 bst-gh78-jk90-mn12 check that the signup form validates the same in both
 ```
 
-Claude pairs with each browser and can name one per step. Each browser's own popup still
-decides what Claude may do there, and the session stays on one site in all of them.
+Claude pairs with each browser and can name one per step. With `browser_compare` it runs
+the same steps in each browser in one call and gets back only what differs: the address, the
+title, form values and error messages, a disabled submit button, and optionally the page text.
+A browser whose popup has Browsteer locked, or the site not allowed, is reported as refusing
+rather than as a difference. Each browser's own popup still decides what Claude may do there,
+and the session stays on one site in all of them.
 
 ## Safe by default
 

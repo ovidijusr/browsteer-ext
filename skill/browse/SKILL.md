@@ -43,9 +43,28 @@ one call on another. Replies from a named browser start with `[edge (bst-…)]`.
 keeps its own pinned tab; the session's one-site lock covers all of them, so open the same
 site in each. Each browser's own popup still decides whether Claude may act there.
 
-To compare, do the same steps in each and report the differences (a field that validates
-in one and not the other, a layout that breaks, a different price or total). Calls to two
-browsers can be made in parallel; the bridge runs them one after another.
+To compare, use **`browser_compare`**: one call runs the same steps (the `browser_do` step
+syntax) in each paired browser, one after another, and answers with a one-line step summary
+per browser plus only what differs in the final state: URL, title, the form report (values,
+`*checked`, chosen options, error text, `*required`, submit `*disabled`) and, with
+`check: "text"` or `"snapshot"`, the page text or the whole outline. When nothing differs it
+says `Same in all N browsers`. Refs are ignored in the diff.
+
+```
+browser_compare({ steps: [{ navigate: "https://shop.example/signup" },
+                          { find: "the email field", fill: "not-an-email" },
+                          { find: "the sign up button" }],
+                  check: "text" })
+```
+
+`browsers` defaults to every browser the session paired; pass `["edge", "firefox"]` to pick.
+Without `steps` it compares the pages as they are now. A browser that refuses (locked, site
+not allowed, read only, another site) is reported as `refused — <reason>` and left out of the
+diff: relay the reason to the user, it is their popup setting, not a page difference. Report
+the differences in plain words (a field that validates in one and not the other, a different
+total, a submit button disabled in one). For layout, follow up with `browser_scan` in each
+browser (`browser: "edge"`). Single calls to two browsers can still be made in parallel; the
+bridge runs them one after another.
 
 ## Procedure
 

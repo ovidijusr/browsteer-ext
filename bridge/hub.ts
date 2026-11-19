@@ -256,6 +256,7 @@ async function execOp(ctl: Controller, op: string, p: any): Promise<Res> {
 }
 
 async function execRouted(ctl: Controller, op: string, p: any): Promise<Res> {
+  if (op === "compare") return compare(ctl, p ?? {});
   if (op === "pair" || p?.browser == null || p.browser === "") return execOne(ctl, op, p);
   let key: string;
   try { key = resolveBrowser(ctl, String(p.browser)); } catch (e: any) { return fail(e.message); }
@@ -265,6 +266,161 @@ async function execRouted(ctl: Controller, op: string, p: any): Promise<Res> {
     const r = await execOne(ctl, op, p);
     return { ...r, text: `[${browserLabel(key)}]\n${r.text}` };
   } finally { if (back && back !== key) switchTo(ctl, back); }
+}
+
+// ── Compare: the same steps in several browsers, then only what differs ──────
+// One call instead of repeating every step per browser. The browsers run one after
+// another (each swaps in its own tab state, as a browser:"…" call does), each under
+// its own access rules and the session's one-site lock. A browser that refuses
+// (locked, site not allowed, read only, other site) is reported as refusing, and
+// left out of the comparison: a refusal is not a difference in the page.
+type PageState = { url: string; title: string | null; form: string; page: string[] | null };
+type CompareRow = { key: string; summary: string; outcome: "ok" | "refused" | "failed"; why?: string; state?: PageState };
+const REFUSAL = /Browsteer is locked|read-only mode|allowed list|blocked list|not a web page Browsteer|This session is locked to|no longer connected/;
+const COMPARE_CHECKS = new Set(["form", "text", "snapshot"]);
+const MAX_DIFF_LINES = 40;
+/** Refs are numbered per browser and mean nothing across them. */
+const noRefs = (l: string) => l.replace(/\[\d+(?:-\d+)?\]\s?/g, "").trimEnd();
+
+async function capturePage(ctl: Controller, check: string): Promise<PageState> {
+  const prev = ctl.lastOpMayNavigate;
+  ctl.lastOpMayNavigate = false;
+  const f = await callExtension(ctl, "form", {});
+  const refuse = driftRefusal(ctl, "form", f.url, prev);
+  if (refuse) throw new Error(refuse);
+  maybeAutoPin(ctl, f.tabId);
+  noteUrl(ctl, f.url);
+  let page: string[] | null = null;
+  if (check !== "form") {
+    // Uncollapsed and undeduplicated: a folded run would hide the very differences we look for.
+    const s = await callExtension(ctl, "snapshot", { interactiveOnly: false, filters: listFilters(), chrome: true, collapse: false, dedup: false });
+    const lines = String(s.tree ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+    // text: what the page says (text lines, and named things that are not controls, like headings).
+    page = (check === "text" ? lines.filter((l) => !/^\[\d/.test(l) && l.includes('"')) : lines).map(noRefs);
+  }
+  return { url: f.url, title: typeof f.title === "string" ? f.title : null, form: String(f.text ?? ""), page };
+}
+
+async function compareOne(ctl: Controller, key: string, steps: any[], check: string, cont: boolean): Promise<CompareRow> {
+  let summary = "no steps";
+  if (steps.length) {
+    const r = await execOne(ctl, "do", { steps, continue: cont, finalSnapshot: false });
+    const lines = r.text.split("\n");
+    summary = lines[0];
+    if (r.isError) {
+      const refused = lines.map((l) => l.trim()).find((l) => REFUSAL.test(l));
+      if (refused) return { key, summary, outcome: "refused", why: refused.replace(/^\d+\. .*? — /, "").replace(/\s*\(\d+ ms\)$/, "") };
+      const at = lines.findIndex((l) => l.trim().startsWith("↳ stopped here"));
+      if (at > 0) summary += ` at ${lines[at - 1].trim()}`;
+    }
+  }
+  try { return { key, summary, outcome: "ok", state: await capturePage(ctl, check) }; }
+  catch (e: any) { return { key, summary, outcome: REFUSAL.test(e.message) ? "refused" : "failed", why: e.message }; }
+}
+
+/** One line per control (key = role, name and id without the ref), so a changed value reads as one field, not two lines. */
+function formFields(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const seen = new Map<string, number>();
+  for (const raw of text.split("\n")) {
+    const line = noRefs(raw).trim();
+    if (!line) continue;
+    const m = line.match(/^(radio group \([^)]*\)):\s*(.*)$/) ?? line.match(/^(→ submit "(?:[^"\\]|\\.)*")\s*(.*)$/) ?? line.match(/^([^\s"]+ "(?:[^"\\]|\\.)*"(?: \([^)]*\))?)\s*(.*)$/);
+    const [key, val] = m ? [m[1], m[2]] : [line, ""];
+    const n = (seen.get(key) ?? 0) + 1;
+    seen.set(key, n);
+    out.set(n > 1 ? `${key} #${n}` : key, val);
+  }
+  return out;
+}
+
+type Col = { label: string; row: CompareRow };
+function diffFields(cols: Col[]): string[] {
+  const maps = cols.map((c) => formFields(c.row.state!.form));
+  const keys = [...new Set(maps.flatMap((m) => [...m.keys()]))];
+  const width = Math.max(...cols.map((c) => c.label.length)) + 1;
+  const out: string[] = [];
+  for (const k of keys) {
+    const vals = maps.map((m) => m.get(k));
+    if (vals.every((v) => v === vals[0])) continue;
+    out.push(`  ${k}`, ...cols.map((c, i) => `    ${(c.label + ":").padEnd(width)} ${vals[i] === undefined ? "(not there)" : vals[i] || (k.startsWith("→ submit") ? "enabled" : "—")}`));
+  }
+  return out;
+}
+function diffLines(cols: Col[]): string[] {
+  const counts = cols.map((c) => { const m = new Map<string, number>(); for (const l of c.row.state!.page!) m.set(l, (m.get(l) ?? 0) + 1); return m; });
+  const lines = [...new Set(counts.flatMap((m) => [...m.keys()]))];
+  const out: string[] = [];
+  for (const l of lines) {
+    const n = counts.map((m) => m.get(l) ?? 0);
+    if (n.every((x) => x === n[0])) continue;
+    out.push(n.every((x) => x <= 1)
+      ? `  ${l}  — only in ${cols.filter((_, i) => n[i]).map((c) => c.label).join(", ")}`
+      : `  ${l}  — ${cols.map((c, i) => `${c.label} ×${n[i]}`).join(", ")}`);
+  }
+  return out;
+}
+const capped = (lines: string[], unit: string) => lines.length > MAX_DIFF_LINES
+  ? [...lines.slice(0, MAX_DIFF_LINES), `  … ${lines.length - MAX_DIFF_LINES} more ${unit}`] : lines;
+
+async function compare(ctl: Controller, p: any): Promise<Res> {
+  const check = String(p.check ?? "form");
+  if (!COMPARE_CHECKS.has(check)) return fail(`compare: check must be "form", "text" or "snapshot".`);
+  const steps: any[] = Array.isArray(p.steps) ? p.steps : [];
+  if (steps.length > 20) return fail("compare: at most 20 steps.");
+  let keys: string[];
+  try {
+    const names: string[] = Array.isArray(p.browsers) && p.browsers.length ? p.browsers.map(String) : [...ctl.paired.keys()];
+    keys = [...new Set(names.map((n) => resolveBrowser(ctl, n)))];
+  } catch (e: any) { return fail(e.message); }
+  if (keys.length < 2) {
+    const list = [...ctl.paired.keys()].map(browserLabel).join(", ") || "none";
+    return fail(`compare needs two or more paired browsers. Paired in this session: ${list}. Ask the user for the other browser's key and call browser_pair({ key }).`);
+  }
+  const t0 = performance.now();
+  const back = ctl.activeKey;
+  const rows: CompareRow[] = [];
+  try {
+    for (const key of keys) { switchTo(ctl, key); rows.push(await compareOne(ctl, key, steps, check, p.continue === true)); }
+  } finally { if (back) switchTo(ctl, back); }
+
+  // Short labels: the browser's name, or its key when two share a name.
+  const nameOf = (k: string) => browsers.get(k)?.data.browserName ?? k;
+  const label = (k: string) => keys.filter((x) => nameOf(x) === nameOf(k)).length > 1 ? k : nameOf(k);
+  const head = rows.map((r) => `${browserLabel(r.key)}: ${r.outcome === "ok" ? r.summary : `${r.outcome === "refused" ? "refused" : "failed"}${steps.length ? ` (${r.summary})` : ""} — ${r.why}`}`);
+  const cols: Col[] = rows.filter((r) => r.outcome === "ok").map((r) => ({ label: label(r.key), row: r }));
+  const total = Math.round(performance.now() - t0);
+  const top = `Compared ${keys.length} browsers (${check}${steps.length ? `, ${steps.length} step${steps.length === 1 ? "" : "s"} each` : ""}) in ${total} ms`;
+  logAction({ tab_url: cols[0]?.row.state?.url, tool: "compare", value: keys.map(nameOf).join(" | "), ok: cols.length === keys.length, element_count: keys.length, detail: { check, steps: steps.length, outcomes: rows.map((r) => r.outcome), ms: total } });
+  if (cols.length < 2) {
+    return fail(`${top}\n${head.join("\n")}\n\nNothing to compare: ${cols.length ? `only ${cols[0].label} answered` : "no browser answered"}. A refusal is the user's setting in that browser's Browsteer popup, not a difference in the page.`);
+  }
+
+  const same: string[] = [];
+  const parts: string[] = [];
+  const s0 = cols[0].row.state!;
+  const perBrowser = (what: string, get: (s: PageState) => string) => {
+    const vals = cols.map((c) => get(c.row.state!));
+    if (vals.every((v) => v === vals[0])) { same.push(what === "URL" ? `URL (${vals[0]})` : what); return; }
+    const width = Math.max(...cols.map((c) => c.label.length)) + 1;
+    parts.push(what, ...cols.map((c, i) => `  ${(c.label + ":").padEnd(width)} ${vals[i]}`));
+  };
+  perBrowser("URL", (s) => s.url);
+  if (cols.some((c) => c.row.state!.title != null)) perBrowser("title", (s) => s.title ?? "(not reported)");
+  const fd = diffFields(cols);
+  const fields = formFields(s0.form).size;
+  if (fd.length) parts.push(`form (${fd.filter((l) => !l.startsWith("    ")).length} of ${fields} lines differ)`, ...capped(fd, "lines"));
+  else same.push(`form (${fields} line${fields === 1 ? "" : "s"})`);
+  if (check !== "form") {
+    const ld = diffLines(cols);
+    if (ld.length) parts.push(`${check} (${ld.length} line${ld.length === 1 ? "" : "s"} differ)`, ...capped(ld, "lines"));
+    else same.push(check);
+  }
+  const who = cols.length === keys.length ? `all ${cols.length} browsers` : `the ${cols.length} browsers that answered`;
+  const body = parts.length
+    ? `Differences (${cols.map((c) => c.label).join(" vs ")}):\n${parts.join("\n")}${same.length ? `\nSame in ${who}: ${same.join(", ")}.` : ""}`
+    : `Same in ${who}: ${same.join(", ")}.`;
+  return ok(`${top}\n${head.join("\n")}\n\n${body}`);
 }
 
 async function execOne(ctl: Controller, op: string, p: any): Promise<Res> {

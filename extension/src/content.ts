@@ -396,7 +396,8 @@ function handleOp(op: string, params: any): unknown {
     }
     case "form": {
       const root = params?.ref != null ? (resolve(params.ref) as Element) : undefined;
-      return formReport(document, { root });
+      // The title rides along so browser_compare can tell two pages apart without another call.
+      return { ...formReport(document, { root }), title: document.title };
     }
     case "href": { const el = resolve(params.ref) as Element; return { url: location.href, href: absoluteHref(el, location.href) }; }
     case "click": return params?.ref == null && params?.x != null ? doClickAt(params.x, params.y, params.confirm === true) : doClick(params.ref, params.confirm === true);

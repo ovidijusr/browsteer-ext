@@ -121,7 +121,8 @@ const mcp = new McpServer({ name: "browsteer", version: VERSION });
 const BROWSER_ARG = z.string().optional().describe("Run this call on another paired browser: its name ('edge', 'firefox', 'chrome', 'brave') or its key. Omit to use the default (the last one paired).");
 function tool(name: string, config: any) {
   const op = name.replace(/^browser_/, "");
-  if (name !== "browser_pair") config = { ...config, inputSchema: { ...(config.inputSchema ?? {}), browser: BROWSER_ARG } };
+  // pair takes a key, and compare names its own browsers.
+  if (name !== "browser_pair" && name !== "browser_compare") config = { ...config, inputSchema: { ...(config.inputSchema ?? {}), browser: BROWSER_ARG } };
   mcp.registerTool(name, config, async (args: any) => {
     const r = await forward(op, args ?? {});
     return { isError: !r.ok, content: [{ type: "text", text: r.text }] };
@@ -419,6 +420,19 @@ tool("browser_find", {
   },
 });
 
+// One step of browser_do / browser_compare: steps name targets, never refs.
+const STEP = z.object({
+  find: z.string().optional().describe("Target to find; clicks it unless `fill` is given"),
+  fill: z.string().optional().describe("Text to type into the found target"),
+  click: z.boolean().optional().describe("Explicit click (default for a bare find)"),
+  fresh: z.boolean().optional().describe("Bypass memo/lexical for this find"),
+  press: z.string().optional().describe("Key to dispatch to the focused element, e.g. 'Enter'"),
+  navigate: z.string().optional().describe("URL to load"),
+  pursue: z.string().optional().describe("Multi-hop goal (click-only)"),
+  maxSteps: z.number().int().min(1).max(12).optional(),
+  wait: z.number().optional().describe("Sleep ms (max 5000) — for pages that animate after a click"),
+});
+
 tool("browser_do", {
   title: "Run a scripted sequence of steps in one call",
   description:
@@ -429,19 +443,28 @@ tool("browser_do", {
     "Stops at the first failed/refused/low-confidence step (its full reply is included) unless continue:true. " +
     "Example: [{find:'the email field', fill:'a@b.c'}, {find:'the password field', fill:'…'}, {find:'the sign in button'}, {pursue:'the invoices page'}].",
   inputSchema: {
-    steps: z.array(z.object({
-      find: z.string().optional().describe("Target to find; clicks it unless `fill` is given"),
-      fill: z.string().optional().describe("Text to type into the found target"),
-      click: z.boolean().optional().describe("Explicit click (default for a bare find)"),
-      fresh: z.boolean().optional().describe("Bypass memo/lexical for this find"),
-      press: z.string().optional().describe("Key to dispatch to the focused element, e.g. 'Enter'"),
-      navigate: z.string().optional().describe("URL to load"),
-      pursue: z.string().optional().describe("Multi-hop goal (click-only)"),
-      maxSteps: z.number().int().min(1).max(12).optional(),
-      wait: z.number().optional().describe("Sleep ms (max 5000) — for pages that animate after a click"),
-    })).min(1).max(20),
+    steps: z.array(STEP).min(1).max(20),
     continue: z.boolean().optional().describe("Keep going after a failed step (default: stop and report)"),
     finalSnapshot: z.boolean().optional().describe("Append the final page (default true)"),
+  },
+});
+
+tool("browser_compare", {
+  title: "Compare a page in several browsers",
+  description:
+    "Cross-browser check in ONE call: runs the same steps (browser_do syntax) in each paired browser, one after another, " +
+    "then reports a one-line step summary per browser and a compact diff of the final state: URL, title, the form report " +
+    "(values, *checked, chosen options, error text, *required, submit *disabled) and, with check:'text' or 'snapshot', " +
+    "the page text or the whole outline. Only what differs is shown; 'Same in all N browsers' when nothing does. " +
+    "Refs are ignored in the diff (they are numbered per browser). Pair every browser first (browser_pair once per key); " +
+    "each keeps its own tab, its own access rules and the session's one-site lock. A browser that refuses (locked, site " +
+    "not allowed, read only) is reported as refusing and left out of the diff: that is the user's popup setting, not a page " +
+    "difference. Without steps it compares the pages as they are now.",
+  inputSchema: {
+    browsers: z.array(z.string()).min(2).max(6).optional().describe("Paired browsers to compare, by name ('edge', 'firefox') or key. Default: every browser this session paired."),
+    steps: z.array(STEP).max(20).optional().describe("Steps to run in each browser first, as in browser_do, e.g. [{navigate:'https://…/signup'}, {find:'the email field', fill:'not-an-email'}, {find:'the sign up button'}]"),
+    check: z.enum(["form", "text", "snapshot"]).optional().describe("What to diff besides URL and title: 'form' (default) = the form report; 'text' = form + the page's text; 'snapshot' = form + the whole outline"),
+    continue: z.boolean().optional().describe("Keep running a browser's steps after one fails (default: stop that browser's steps, still compare its page)"),
   },
 });
 
