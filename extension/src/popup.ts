@@ -6,7 +6,7 @@
 // can change; the bridge cannot.
 import { ext } from "./ext";
 import { drawIcons, setIcon, type IconName } from "./icons";
-import { CONFIG_FILE, HUB_STOP, UPDATE_CMD, clock, command, copyWithFeedback, getStatus, hostText, jevNote, minutesLeft, openFor, send, setText, trustPrompt, untilText, updatePrompt, type Status } from "./keyview";
+import { CONFIG_FILE, UPDATE_CMD, clock, command, copyWithFeedback, getStatus, hostText, jevNote, minutesLeft, openFor, send, setText, trustPrompt, untilText, updatePrompt, type Status } from "./keyview";
 import { ARM_MINUTES, covers } from "./policy";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -179,7 +179,7 @@ function paintRefused(origin: string) {
   if (origin === refusedOrigin) return;
   refusedOrigin = origin;
   $("refOrigin").textContent = origin;
-  setText($("refAlt"), `Or by hand: add it to "extensions" in \`${CONFIG_FILE}\`, then run \`${HUB_STOP}\`.`);
+  setText($("refAlt"), `Or by hand: add it to "extensions" in \`${CONFIG_FILE}\`. The extension connects again by itself.`);
 }
 
 /** The extension and the bridge update separately; say so when they disagree, with the fix as one action. */

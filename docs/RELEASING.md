@@ -168,7 +168,7 @@ published there, has its own item ID, which would be a second entry.
 
 With an older bridge, or any other build, the popup shows *This bridge doesn't trust this
 browser yet* with the exact origin, a *Copy prompt for Claude Code* button (add the origin
-to `"extensions"`, then `bun run hub:stop`), and the manual steps. The hub also prints the
+to `"extensions"`; nothing needs restarting), and the manual steps. The hub also prints the
 origin when it refuses one.
 
 ## Updating the bridge

@@ -131,7 +131,7 @@ list does not stay open for whatever connects next.
 
 When the bridge refuses an extension, the popup says *This bridge doesn't trust this
 browser yet*, shows that extension's exact origin, and offers a prompt to paste into
-Claude Code (add the origin to `extensions`, then `bun run hub:stop`) with the same
+Claude Code (add the origin to `extensions`; the bridge reads the list on every connection) with the same
 steps for doing it by hand. Claude, through the bridge, cannot change the list: no
 controller message touches `extensions`. A Claude Code session can edit the file
 only through its own tools, under Claude Code's permission prompts, when you ask it to.
