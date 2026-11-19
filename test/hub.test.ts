@@ -311,6 +311,9 @@ describe("authentication", () => {
     const r = await knock(asExtension("chrome-extension://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), { type: "register", key: "bst-rogu-rogu-rogu" });
     expect(r.type).toBe("denied");
     expect(r.reason).toContain("bound to another extension");
+    // The popup shows this state with the exact origin to add.
+    expect(r.code).toBe("untrusted");
+    expect(r.origin).toBe("chrome-extension://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
   });
 
   test("the bound extension is written to config.json", () => {

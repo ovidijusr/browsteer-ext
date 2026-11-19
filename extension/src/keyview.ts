@@ -31,6 +31,8 @@ export type Status = {
   jev: JevState | null;
   /** When a Claude Code session last paired with this browser (0 = never). */
   pairedAt: number;
+  /** The bridge refused this extension: its origin (to add to "extensions" in config.json), else null. */
+  refused: string | null;
   /** The setup guide was finished (or the extension was updated from an earlier version). */
   setupDone: boolean;
 };
@@ -86,6 +88,14 @@ export async function copyWithFeedback(label: HTMLElement, text: string, done = 
 export const UPDATE_CMD = "bun run update";
 export function updatePrompt(dir: string | null): string {
   return `Update Browsteer: run \`${UPDATE_CMD}\` in ${dir ?? "the Browsteer folder (the browsteer-ext git checkout)"}, then tell me what changed.`;
+}
+
+// ── A bridge that does not trust this extension yet ──────────────────────────
+// Only the person can change that, in a file Claude cannot reach through the bridge.
+export const CONFIG_FILE = "~/.browsteer/config.json";
+export const HUB_STOP = "bun run hub:stop";
+export function trustPrompt(origin: string): string {
+  return `The Browsteer bridge refuses my browser's extension. Add "${origin}" to the "extensions" list in ${CONFIG_FILE} (keep the entries already there), then run \`${HUB_STOP}\` in the Browsteer folder.`;
 }
 
 /** What the person should do about semantic targeting, or null when nothing needs doing. */

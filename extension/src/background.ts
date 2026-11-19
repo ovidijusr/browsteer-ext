@@ -27,6 +27,13 @@ let hubVersion: string | null = null;
 /** The Browsteer folder on this computer, as the hub reported it (for the update prompt). */
 let bridgeDir: string | null = null;
 const MY_VERSION: string = ext.runtime.getManifest().version;
+/** This extension's origin, the way the bridge sees it ("chrome-extension://…", "moz-extension://…"). */
+const MY_ORIGIN = ext.runtime.getURL("").replace(/\/$/, "");
+// The bridge turned this extension away: it trusts only the extension origins in its
+// config (and the store builds). Holds the origin to add, until a register succeeds.
+// The popup shows it with the fix; only the person can make the bridge trust it.
+let refused: string | null = null;
+let lastConnect = 0;
 
 // ── Semantic targeting (Jev) ──────────────────────────────────────────────────
 // A setting of the bridge, not of the extension: the bridge reports it, and the
@@ -207,6 +214,7 @@ let pingTimer: ReturnType<typeof setInterval> | null = null;
 
 function connect() {
   log("connecting to", BRIDGE_URL);
+  lastConnect = Date.now();
   ws = new WebSocket(BRIDGE_URL);
 
   ws.onopen = async () => {
@@ -231,7 +239,17 @@ function connect() {
       return;
     }
     if ((req as any).type === "paired") { ext.storage.local.set({ pairedAt: Date.now() }); return; }
-    if ((req as any).type === "registered") { hubVersion = typeof (req as any).hubVersion === "string" ? (req as any).hubVersion : null; bridgeDir = typeof (req as any).dir === "string" ? (req as any).dir : null; jev = readJev((req as any).jev); return; }
+    if ((req as any).type === "denied") {
+      const m = req as any;
+      log("bridge refused this extension:", m.reason);
+      if (m.code === "untrusted" || /bound to another extension/.test(String(m.reason))) {
+        refused = typeof m.origin === "string" && /^(moz|chrome)-extension:\/\/[a-z0-9-]+$/i.test(m.origin) ? m.origin : MY_ORIGIN;
+        // Asking again every second will not change the answer: retry at the slowest pace.
+        attempt = RETRY_MS.length - 1;
+      }
+      return;
+    }
+    if ((req as any).type === "registered") { refused = null; hubVersion = typeof (req as any).hubVersion === "string" ? (req as any).hubVersion : null; bridgeDir = typeof (req as any).dir === "string" ? (req as any).dir : null; jev = readJev((req as any).jev); return; }
     if ((req as any).type === "jev") { jev = readJev(req); jevWaiters.splice(0).forEach((f) => f()); return; }
     try {
       await settingsReady;
@@ -379,6 +397,8 @@ async function status() {
   try { tab = await ext.tabs.get(await activeTabId()); } catch {}
   const host = hostOf(tab?.url);
   const connected = ws?.readyState === WebSocket.OPEN;
+  // Refused: while the popup is open, ask again every few seconds so the fix shows at once.
+  if (refused && !connected && Date.now() - lastConnect > 4000) ensureConnected();
   // The key file can appear while the page is open (bun run setup): re-ask now and then.
   if (connected && Date.now() - jevAsked > 5000) askJev({ type: "jevStatus" });
   return {
@@ -392,6 +412,7 @@ async function status() {
     armed: isArmed(settings),
     site: host ? { host, allowed: siteAllowed(settings, host), blocked: settings.block.some((e) => host === e || host.endsWith(`.${e}`)) } : null,
     jev: connected ? jev : null,
+    refused: connected ? null : refused,
     setupDone: (await ext.storage.local.get("setupDone")).setupDone === true,
     pairedAt: Number((await ext.storage.local.get("pairedAt")).pairedAt) || 0,
   };

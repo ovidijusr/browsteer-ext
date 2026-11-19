@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { classifyOrigin, extensionAllowed, resolveSavePath, resolveUploadFile, sameSite, siteOf, tokenMatches } from "../bridge/security";
+import { STORE_EXTENSIONS, classifyOrigin, extensionAllowed, resolveSavePath, resolveUploadFile, sameSite, siteOf, tokenMatches } from "../bridge/security";
 
 describe("origins", () => {
   test("web pages are refused, extensions and local programs are told apart", () => {
@@ -20,6 +20,12 @@ describe("origins", () => {
     expect(extensionAllowed("chrome-extension://aaa", [])).toBe("first");
     expect(extensionAllowed("chrome-extension://aaa", ["chrome-extension://aaa"])).toBe("yes");
     expect(extensionAllowed("chrome-extension://bbb", ["chrome-extension://aaa"])).toBe("no");
+    // A store build is trusted next to the configured ones, and still fills an empty list first.
+    const store = ["chrome-extension://store"];
+    expect(extensionAllowed("chrome-extension://store", ["chrome-extension://aaa"], store)).toBe("yes");
+    expect(extensionAllowed("chrome-extension://store", [], store)).toBe("first");
+    expect(extensionAllowed("chrome-extension://bbb", ["chrome-extension://aaa"], store)).toBe("no");
+    expect(STORE_EXTENSIONS.every((o) => /^chrome-extension:\/\/[a-p]{32}$/.test(o))).toBe(true);
   });
 });
 

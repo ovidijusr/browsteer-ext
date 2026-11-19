@@ -47,6 +47,13 @@
     <button class="btn primary wide-btn" id="finish" type="button">Finish setup</button>
   </div>
 
+  <!-- The bridge refused this extension: the origin to add, and the fix. -->
+  <div class="refused" id="refusedBox" hidden>
+    <code class="mono origin" id="refOrigin"></code>
+    <button class="btn primary wide-btn" id="refCopy" type="button"><span data-icon="copy" data-size="16"></span><span id="refCopyLabel">Copy prompt for Claude Code</span></button>
+    <p class="alt" id="refAlt"></p>
+  </div>
+
   <div id="main">
     <!-- What Claude may do once open: chosen before granting, so the button says exactly what it grants. -->
     <div class="mode-wrap" id="modeWrap">

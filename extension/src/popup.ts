@@ -6,7 +6,7 @@
 // can change; the bridge cannot.
 import { ext } from "./ext";
 import { drawIcons, setIcon, type IconName } from "./icons";
-import { UPDATE_CMD, clock, command, copyWithFeedback, getStatus, hostText, jevNote, minutesLeft, openFor, send, setText, untilText, updatePrompt, type Status } from "./keyview";
+import { CONFIG_FILE, HUB_STOP, UPDATE_CMD, clock, command, copyWithFeedback, getStatus, hostText, jevNote, minutesLeft, openFor, send, setText, trustPrompt, untilText, updatePrompt, type Status } from "./keyview";
 import { ARM_MINUTES, covers } from "./policy";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -19,6 +19,7 @@ let bridgeDir: string | null = null;
 let updateFix: "prompt" | "check" | "reload" = "prompt";
 let acts: { primary?: Act; secondary?: Act } = {};
 let blockedHost = "";
+let refusedOrigin = "";
 
 function show(id: string, on: boolean) { $(id).hidden = !on; }
 function text(id: string, t = "") { $(id).textContent = t; show(id, !!t); }
@@ -40,6 +41,7 @@ function card(s: Status): Card {
   const pairing = !s.connected ? idle : paired ? `Claude Code paired ${ago < 1 ? "just now" : `${ago} min ago`}` : "";
   const listed = site && s.settings.allow.some((e) => covers(e, host));
   const elsewhere = s.armed ? ` Your ${site?.blocked ? "other " : ""}allowed sites stay open ${openFor(s)}.` : "";
+  if (s.refused && !s.connected) return { bar: "off", tone: "off", icon: "plug", state: "This bridge doesn't trust this browser yet", detail: "The bridge on this computer only works with the extensions on its list. Add this one:" };
   if (!s.connected && !s.setupDone) return { bar: "off", tone: "off", icon: "plug", state: "Not set up", detail: "Finish setup to connect Claude Code to this browser." };
   if (site?.blocked) return { bar, tone: "locked", icon: "blocked", state: "Blocked here", host, detail: `Claude can never act on this site.${elsewhere}`, note: idle };
   if (!s.armed) return {
@@ -121,10 +123,13 @@ function render(s: Status | null) {
   if (timed) $("drainFill").style.width = `${Math.max(2, Math.min(100, ((s.settings.armedUntil - Date.now()) / (ARM_MINUTES * 60_000)) * 100))}%`;
 
   const unset = !s.connected && !s.setupDone;
-  show("setupActions", unset);
-  show("main", !unset);
+  const refused = !!s.refused && !s.connected;
+  show("refusedBox", refused);
+  show("setupActions", unset && !refused);
+  show("main", !unset && !refused);
   paintUpdate(s);
-  if (unset) return;
+  if (refused) paintRefused(s.refused!);
+  if (unset || refused) return;
 
   // Read and act, or read only: chosen before granting.
   const site = s.site;
@@ -167,6 +172,14 @@ function render(s: Status | null) {
   const note = needKey ? null : jevNote(s);
   show("jevNote", !!note);
   setText($("jevNote"), note ?? "");
+}
+
+/** Refused by the bridge: the exact origin, a prompt for Claude Code, and the manual fix. */
+function paintRefused(origin: string) {
+  if (origin === refusedOrigin) return;
+  refusedOrigin = origin;
+  $("refOrigin").textContent = origin;
+  setText($("refAlt"), `Or by hand: add it to "extensions" in \`${CONFIG_FILE}\`, then run \`${HUB_STOP}\`.`);
 }
 
 /** The extension and the bridge update separately; say so when they disagree, with the fix as one action. */
@@ -266,6 +279,8 @@ async function showLastPick() {
 }
 
 // Update: paste-ready prompt for Claude Code; for an older extension, update or reload it in place.
+$("refCopy").addEventListener("click", () => { if (refusedOrigin) copyWithFeedback($("refCopyLabel"), trustPrompt(refusedOrigin), "Copied. Paste it into Claude Code"); });
+
 $("updAct").addEventListener("click", async () => {
   if (updateFix === "prompt") return copyWithFeedback($("updAct"), updatePrompt(bridgeDir), "Copied. Paste it into Claude Code");
   if (updateFix === "reload") return ext.runtime.reload();

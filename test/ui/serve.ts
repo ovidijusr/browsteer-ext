@@ -29,7 +29,7 @@ const VERSION: string = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf
 
 export const STATES = [
   "fresh", "setup-1", "setup-2", "setup-3", "setup-finished",
-  "bridge-off", "locked", "locked-allowed", "ending", "jev-ready-on", "armed", "allowed", "blocked", "read-only", "mismatch", "bridge-old", "firefox-old",
+  "bridge-off", "refused", "locked", "locked-allowed", "ending", "jev-ready-on", "armed", "allowed", "blocked", "read-only", "mismatch", "bridge-old", "firefox-old",
   "no-site", "every-site", "always-on", "wide-open", "jev-on", "jev-no-key", "jev-key-off", "picked", "setup-done",
 ];
 

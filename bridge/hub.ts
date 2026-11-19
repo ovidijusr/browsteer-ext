@@ -883,7 +883,7 @@ if (process.argv.includes("--stop")) {
         message(ws, raw) {
           let msg: any; try { msg = JSON.parse(String(raw)); } catch { return; }
           if (msg.type === "ping") return; // extension keep-alive (holds Chrome's service worker open)
-          const deny = (reason: string) => { try { ws.send(JSON.stringify({ type: "denied", reason })); } catch {} ws.close(); };
+          const deny = (reason: string, extra: Record<string, string> = {}) => { try { ws.send(JSON.stringify({ type: "denied", reason, ...extra })); } catch {} ws.close(); };
           // Controllers: local programs only, and only with the token from ~/.browsteer/token.
           if (msg.type === "shutdown" || (msg.type === "hello" && msg.role === "control")) {
             if (ws.data.peer !== "local" || !tokenMatches(TOKEN, msg.token)) return deny(`Not authorised. Controllers must send the token in ${join(DATA_DIR, "token")}.`);
@@ -897,7 +897,8 @@ if (process.argv.includes("--stop")) {
           if (msg.type === "register" && typeof msg.key === "string") {
             if (ws.data.peer !== "extension" || !ws.data.origin) return deny("Only the Browsteer extension may register a browser.");
             const verdict = extensionAllowed(ws.data.origin, loadConfig().extensions);
-            if (verdict === "no") { console.error(`[hub] refused extension ${ws.data.origin} (not in "extensions" in config.json)`); return deny(`This hub is bound to another extension. Add "${ws.data.origin}" to "extensions" in ${join(DATA_DIR, "config.json")} to allow this one.`); }
+            if (verdict === "no") { console.error(`[hub] refused extension ${ws.data.origin} (not in "extensions" in config.json)`); // code + origin let the popup show "this bridge doesn't trust this browser yet" with the exact fix.
+              return deny(`This hub is bound to another extension. Add "${ws.data.origin}" to "extensions" in ${join(DATA_DIR, "config.json")} to allow this one.`, { code: "untrusted", origin: ws.data.origin }); }
             if (verdict === "first") { updateConfig({ extensions: [ws.data.origin] }); console.error(`[hub] bound to extension ${ws.data.origin} (saved in config.json)`); }
             if (!/^bst(-[a-z0-9]{4}){3}$/.test(msg.key)) return deny("Pairing key has the wrong format. Update the extension.");
             if (ws.data.key && browsers.get(ws.data.key) === ws) browsers.delete(ws.data.key); // New key: the old one stops working

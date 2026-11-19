@@ -9,7 +9,7 @@ help with the page I am looking at", and what it does not protect against.
 | Who | What stops them |
 |---|---|
 | A web page, in any browser, opening a socket to the bridge | The bridge refuses any connection whose `Origin` is a web address. |
-| Another browser extension | The bridge is bound to the first Browsteer extension that registers (`extensions` in `~/.browsteer/config.json`) and refuses others. Extensions can never act as a controller. |
+| Another browser extension | The bridge is bound to the first Browsteer extension that registers (`extensions` in `~/.browsteer/config.json`) and refuses others. The official store builds, listed in `STORE_EXTENSIONS` in `bridge/security.ts`, are trusted as well (none yet). Extensions can never act as a controller. |
 | Another device on the network | The bridge listens on `127.0.0.1` only. |
 | Another user account on this computer, or a process that cannot read your home folder | Controllers must present the secret in `~/.browsteer/token` (mode 600). |
 | A local program that reaches the bridge but has no pairing key | There is no default browser. Without `browser_pair` and the right key nothing is targeted, and a wrong key is not answered with a list of right ones. |
@@ -120,6 +120,21 @@ everything else you put there.
 `extensions` is filled in with the first extension that connects. After
 reinstalling the extension in Firefox (its internal address changes), or when
 adding a second browser, add the origin the hub prints when it refuses it.
+
+Nothing else is trusted without you. Besides that list and the first-connect rule,
+the bridge trusts only the official store builds, which have the same ID on every
+computer: `STORE_EXTENSIONS` in `bridge/security.ts`, a constant in the code, empty
+until the Chrome Web Store item exists. Firefox gives each profile its own extension
+address, so add-ons.mozilla.org installs can never be listed there. A store build
+that connects to an empty list is remembered like any first extension, so the empty
+list does not stay open for whatever connects next.
+
+When the bridge refuses an extension, the popup says *This bridge doesn't trust this
+browser yet*, shows that extension's exact origin, and offers a prompt to paste into
+Claude Code (add the origin to `extensions`, then `bun run hub:stop`) with the same
+steps for doing it by hand. Claude, through the bridge, cannot change the list: no
+controller message touches `extensions`. A Claude Code session can edit the file
+only through its own tools, under Claude Code's permission prompts, when you ask it to.
 
 ## Releases and updates
 

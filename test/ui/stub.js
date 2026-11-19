@@ -20,10 +20,13 @@
     jev: { on: false, keyPresent: false, envOverride: false },
     setupDone: true,
     pairedAt: 0,
+    refused: null,
   });
 
   // Each state is a change to the base. Popup and setup page states share the list.
   const STATES = {
+    // The bridge does not trust this extension (a store install next to an unpacked one, say).
+    refused: (s) => { s.connected = false; s.hubVersion = null; s.jev = null; s.refused = "chrome-extension://adffpefpkgmmeakcpfmgkbpogeljjaan"; },
     "bridge-off": (s) => { s.connected = false; s.hubVersion = null; s.jev = null; },
     // A fresh install: the popup offers only "Finish setup".
     fresh: (s) => { s.connected = false; s.hubVersion = null; s.jev = null; s.setupDone = false; },

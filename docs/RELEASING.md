@@ -150,10 +150,26 @@ From then on every pushed tag submits the new version.
 ### Store installs and the bridge
 
 The bridge trusts the extension origins listed under `"extensions"` in
-`~/.browsteer/config.json` and remembers the first one that connects. A store install has a
-different ID from an unpacked one, so someone switching from an unpacked build to the store
-build adds `chrome-extension://<store item ID>` to that list (the hub prints the exact origin
-when it refuses one).
+`~/.browsteer/config.json`, remembers the first one that connects, and also trusts the
+official store builds listed in `STORE_EXTENSIONS` in `bridge/security.ts`. That list is
+empty until the Chrome Web Store item exists. Once it does:
+
+1. Add `"chrome-extension://<32-letter item ID>"` to `STORE_EXTENSIONS` (the item ID is on
+   the dashboard's Package tab, and it is the ID a store install shows on
+   `chrome://extensions`). Keep the comment there.
+2. Ship it in the next release. A bridge with that version accepts a store install next to
+   an unpacked one without a config change.
+
+Only store IDs go in that list: a Chrome Web Store ID is the same on every computer. An
+unpacked build's ID follows from its folder path and a Firefox install gets a random
+`moz-extension://` UUID per profile, so those can never be listed; they rely on the
+first-connect rule or on the person's `extensions` list. Edge Add-ons, if Browsteer is ever
+published there, has its own item ID, which would be a second entry.
+
+With an older bridge, or any other build, the popup shows *This bridge doesn't trust this
+browser yet* with the exact origin, a *Copy prompt for Claude Code* button (add the origin
+to `"extensions"`, then `bun run hub:stop`), and the manual steps. The hub also prints the
+origin when it refuses one.
 
 ## Updating the bridge
 

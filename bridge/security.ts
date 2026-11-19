@@ -106,10 +106,25 @@ export function classifyOrigin(origin: string | null): Peer {
   if (!origin) return "local";
   return /^(moz|chrome)-extension:\/\/[a-z0-9-]+$/i.test(origin) ? "extension" : "refused";
 }
+/**
+ * The official store builds, trusted on every machine in addition to config "extensions".
+ * A store install has the same ID everywhere, so it can be named here; an unpacked build
+ * (ID from its folder path) or a temporary Firefox install (random UUID) cannot.
+ * Empty for now: the Chrome Web Store item ID goes here, as
+ * "chrome-extension://<32-letter item ID>", once the store item exists. Firefox gives each
+ * profile its own moz-extension:// UUID, so AMO installs can never be listed. Nothing else
+ * is ever trusted without the person: only this list, config "extensions", and the first
+ * extension to connect while that list is empty.
+ */
+export const STORE_EXTENSIONS: readonly string[] = [];
+
 /** Is this extension the one this hub belongs to? With no list yet, the first to register is remembered. */
-export function extensionAllowed(origin: string, allowed: string[]): "yes" | "first" | "no" {
+export function extensionAllowed(origin: string, allowed: string[], store: readonly string[] = STORE_EXTENSIONS): "yes" | "first" | "no" {
+  if (allowed.includes(origin)) return "yes";
+  // Even a store build is remembered when it is the first: the empty list must not stay
+  // open for whatever connects next.
   if (!allowed.length) return "first";
-  return allowed.includes(origin) ? "yes" : "no";
+  return store.includes(origin) ? "yes" : "no";
 }
 
 // ── Sites ────────────────────────────────────────────────────────────────────
