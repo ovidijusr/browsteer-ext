@@ -2,13 +2,15 @@
 //
 //   bun run scripts/build.ts                 → dist/firefox and dist/chrome
 //   bun run scripts/build.ts chrome --dev    → dist/chrome, unminified
+//   bun run scripts/build.ts chrome --out <dir> → <dir>/chrome (the e2e test builds there,
+//                                                 so dist/ is left alone)
 //
 // Each output directory is a complete, loadable extension. The two differ only
 // in the manifest (how the background runs, browser-specific keys) and in one
 // extra page-world script that Chrome needs for dialog handling.
 import { fileURLToPath } from "node:url";
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 type Target = "firefox" | "chrome";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -17,6 +19,9 @@ const SRC = join(ROOT, "extension");
 const args = process.argv.slice(2);
 const dev = args.includes("--dev");
 const wanted = args.filter((a) => a === "firefox" || a === "chrome") as Target[];
+const outAt = args.indexOf("--out");
+if (outAt >= 0 && !args[outAt + 1]) throw new Error("--out needs a directory");
+const OUT = outAt >= 0 ? resolve(args[outAt + 1]) : join(ROOT, "dist");
 const targets: Target[] = wanted.length ? wanted : ["firefox", "chrome"];
 
 // The bridge port is baked in: the extension can only ever talk to this one address.
@@ -60,7 +65,7 @@ function manifest(target: Target) {
 }
 
 for (const target of targets) {
-  const out = join(ROOT, "dist", target);
+  const out = join(OUT, target);
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
 
@@ -79,5 +84,5 @@ for (const target of targets) {
   for (const f of ["popup.html", "welcome.html", "options.html", "ui.css"]) cpSync(join(SRC, f), join(out, f));
   cpSync(join(SRC, "icons"), join(out, "icons"), { recursive: true });
   writeFileSync(join(out, "manifest.json"), JSON.stringify(manifest(target), null, 2) + "\n");
-  console.log(`built dist/${target}  v${version}${dev ? "  (dev)" : ""}${port === "8787" ? "" : `  (bridge port ${port})`}`);
+  console.log(`built ${relative(ROOT, out).replace(/\\/g, "/") || out}  v${version}${dev ? "  (dev)" : ""}${port === "8787" ? "" : `  (bridge port ${port})`}`);
 }

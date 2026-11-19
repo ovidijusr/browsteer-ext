@@ -144,7 +144,9 @@ session.
 | `scripts/update.ts`, `updates-json.ts` | `bun run update`; the `updates.json` Firefox reads for new versions |
 | `scripts/check-manifest.ts` | CI check: the built manifests ask for exactly what is documented |
 | `.github/workflows/release.yml` | on a `v*` tag: test, build, submit to addons.mozilla.org with the source, publish the GitHub release ([RELEASING.md](RELEASING.md)) |
-| `.github/workflows/ci.yml` | typecheck, tests, build, manifest check, Firefox lint, package |
+| `.github/workflows/ci.yml` | typecheck, tests, build, manifest check, Firefox lint, package; and the end-to-end test in Chromium |
+| `bridge/activity.ts` | the action log in plain words for Settings › Activity (asked for by the registered extension only) |
+| `test/e2e/run.ts` | `bun run test:e2e`: the real extension in a real browser against a hub on its own port |
 | `skill/browse/SKILL.md` | the `/browse` slash command for Claude Code |
 
 ## Tests
@@ -162,7 +164,21 @@ thumbnails, a duplicated financing block, 12 map controls, and 10 footer links.
 extension socket. Together they cover the targeting logic, the connection
 rules, and the semantic-targeting default without launching a browser.
 
-With a real browser:
+End to end, with the real extension in a real browser (not part of `bun test`):
+
+```sh
+bun run test:e2e                       # Edge on Windows, Playwright's Chromium elsewhere
+E2E_CHANNEL=chromium bun run test:e2e  # needs: node_modules/.bin/playwright install chromium
+```
+
+It builds the Chrome extension for port 8799 (`E2E_PORT`) into a temp folder, starts a
+hub there with its own data folder, loads the unpacked build with Playwright, checks
+that the popup shows Locked, allows a local test page and opens access the way the
+popup does, pairs a controller with the browser's key, runs snapshot, fill and click on
+the page, and reads Settings › Activity back. Nothing in `dist/` or `~/.browsteer` and
+no hub on 8787 is touched.
+
+Older manual checks:
 
 ```sh
 bun run test/serve.ts &     # fixture page on :8080
@@ -172,6 +188,8 @@ bun run test/measure.ts     # snapshot vs raw DOM on your current active tab
 
 ## Inspect the action log
 
+Settings › Activity in the extension shows it in plain words. Raw:
+
 ```sh
-sqlite3 ~/.browsteer/browsteer.db 'SELECT ts, tool, ref, ok, error FROM actions ORDER BY id DESC LIMIT 20;'
+sqlite3 ~/.browsteer/browsteer.db 'SELECT ts, browser, session, tool, ref, ok, error FROM actions ORDER BY id DESC LIMIT 20;'
 ```
