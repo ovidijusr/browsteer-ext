@@ -903,7 +903,7 @@ function setTargeting(msg: any): string | undefined {
         if ("error" in c) return c.error;
         next.baseUrl = c.url;
       }
-    } else delete next.baseUrl;
+    } // other presets keep a saved Custom address for later; their own address is fixed
     if (typeof msg.model === "string") {
       if (msg.model && !MODEL_RE.test(msg.model)) return "That model name has characters a model id can't have.";
       next.model = msg.model;

@@ -6,6 +6,7 @@
 // can change; the bridge cannot.
 import { ext } from "./ext";
 import { drawIcons, setIcon, type IconName } from "./icons";
+import { popupHint, popupSetup } from "./targeting";
 import { CONFIG_FILE, UPDATE_CMD, clock, command, copyWithFeedback, getStatus, hostText, jevNote, minutesLeft, openFor, send, setText, trustPrompt, untilText, updatePrompt, type Status } from "./keyview";
 import { ARM_MINUTES, covers } from "./policy";
 
@@ -168,7 +169,9 @@ function render(s: Status | null) {
   const jev = $<HTMLInputElement>("jev");
   jev.checked = !!s.jev?.on;
   jev.disabled = !s.jev || s.jev.envOverride;
-  $("jevHint").textContent = s.jev?.on ? "On. Sends page outlines to TypeSafe." : "Off. When on, sends page outlines to TypeSafe.";
+  // The provider decides where outlines go (or that they stay on this computer).
+  $("jevHint").textContent = popupHint(!!s.jev?.on, s.jev?.targeting);
+  $("jevSetupHint").textContent = popupSetup(s.jev?.targeting);
   const note = needKey ? null : jevNote(s);
   show("jevNote", !!note);
   setText($("jevNote"), note ?? "");

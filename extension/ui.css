@@ -363,6 +363,23 @@ input[role="switch"]:disabled { opacity: .5; cursor: default; }
 .jev-on .switch-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-weight: 650; cursor: pointer; }
 .jev-on .switch-line small { display: block; color: var(--muted); font-size: 13px; font-weight: 500; }
 .jev-on .key-actions { display: flex; gap: 16px; font-size: 13.5px; }
+.provider { margin-bottom: 4px; }
+.field-label.first { margin-top: 4px; }
+.select { min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--edge); border-radius: var(--r); background: var(--surface); color: var(--ink); font: 14px var(--sans); }
+.provider > .select { width: min(100%, 320px); }
+.add .select { flex: 1; font-family: var(--mono); }
+.select:disabled { color: var(--muted); background: var(--sunk); }
+.add input[readonly] { background: var(--sunk); color: var(--ink-2); }
+.field-note { margin-top: 6px; color: var(--muted); font-size: 13px; }
+.test-box { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.test-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--ink-2); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.test-head .btn { min-height: 34px; padding: 6px 14px; }
+.test-rows { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--line); }
+.test-rows li { display: grid; grid-template-columns: 16px 1fr auto; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.test-rows [data-icon] { color: var(--ink-2); align-self: center; display: flex; }
+.test-rows small { display: block; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.test-rows .ms { color: var(--muted); font: 12px var(--mono); }
+.test-box .field-note { margin-top: 10px; }
 .hint-box { padding: 12px 14px; border: 1px dashed var(--edge); border-radius: 10px; color: var(--ink-2); font-size: 14px; }
 .privacy { margin: 14px 0; color: var(--muted); font-size: 13px; }
 .settings footer { display: flex; gap: 20px; align-items: baseline; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 14px; }

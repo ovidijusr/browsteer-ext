@@ -1,24 +1,33 @@
 // Settings page (the extension's options page): how long access lasts, where
-// Claude can work, and semantic targeting (Jev) with its API key. Opened from
+// Claude can work, and semantic targeting: which model provider answers (TypeSafe
+// Jev, nexos.ai, OpenRouter, a local Ollama, a custom address), its model and API
+// key, and a Test. Opened from
 // the popup. The two wide choices are off by default, say their risk before they
 // are picked, and ask for a confirmation; they stay available for people who want them.
 import { ext } from "./ext";
 import { drawIcons } from "./icons";
 import { UPDATE_CMD, getStatus, send, setText, updatePrompt, type Status } from "./keyview";
 import { hostOf } from "./policy";
+import { MODEL_RE, calibrationText, choiceById, choiceOf, privacyText, type Choice, type TargetingInfo, type TestResult } from "./targeting";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const radios = (name: string) => [...document.querySelectorAll<HTMLInputElement>(`input[name=${name}]`)];
 let drawn = "";
 let replacing = false;
 let last: Status | null = null;
+/** The Custom address is being typed: polling must not overwrite it. */
+let baseDirty = false;
 
-/** Send a change, show "Saved", redraw. */
-async function save(type: string, extra: Record<string, unknown> = {}) {
+/** Send a change, show "Saved" (unless the bridge answered with an error), redraw. */
+async function save(type: string, extra: Record<string, unknown> = {}): Promise<Status | null> {
   const s = await send(type, extra);
-  if (s) { const el = $("saved"); el.classList.add("on"); setTimeout(() => el.classList.remove("on"), 1600); }
+  const error = typeof s?.reply?.error === "string" ? s.reply.error : null;
+  if (s && !error) { const el = $("saved"); el.classList.add("on"); setTimeout(() => el.classList.remove("on"), 1600); }
   render(s);
+  return s;
 }
+/** Bridges from 2.2.0 take the provider-aware key messages; older ones only know TypeSafe's. */
+const newBridge = () => !!last?.jev?.targeting;
 
 function render(s: Status | null) {
   if (!s) return;
@@ -63,27 +72,152 @@ function render(s: Status | null) {
   $("noSites").hidden = allow.length + block.length > 0;
 }
 
-/** Three states: nothing to set yet, a key to add, or the switch. */
+/** The provider picker, then one of: an address to set, a key to add, or the switch with Test. */
 function renderJev(s: Status) {
   const off = !s.connected ? "Start the bridge first: run /browse in Claude Code, then come back here."
     : !s.jev ? `The bridge is too old for this. Ask Claude Code: “${updatePrompt(s.bridgeDir)}” Or run \`${UPDATE_CMD}\` there yourself.`
     : null;
   $("jevOff").hidden = !off;
   if (off) setText($("jevOff"), off);
-  const needKey = !off && (!s.jev!.keyPresent || replacing);
+  // Bridges before 2.2.0 know only TypeSafe: no picker, everything else as before.
+  const t = s.jev?.targeting ?? null;
+  $("providerBlock").hidden = !!off || !t;
+  setText($("privacy"), privacyText(t));
+  if (off) { $("jevSetup").hidden = true; $("jevReady").hidden = true; return; }
+  const jev = s.jev!;
+  const openai = t?.provider === "openai";
+  const choice = choiceById(choiceOf(t));
+  const sel = $<HTMLSelectElement>("provider");
+  if (document.activeElement !== sel) sel.value = choice.id;
+  $("endpoint").hidden = !openai;
+  if (t && openai) {
+    const custom = t.preset === "custom";
+    const input = $<HTMLInputElement>("baseUrl");
+    input.readOnly = !custom;
+    $("baseSave").hidden = !custom;
+    if (!custom || (!baseDirty && document.activeElement !== input)) input.value = t.baseUrl || (custom ? "" : choice.baseUrl);
+    renderModels(t, jev.keyPresent);
+  }
+  // Custom needs its address before anything else; a service on this computer needs no key.
+  const ready = !openai || !!t?.host;
+  const keyNeeded = t ? t.keyNeeded : true;
+  const needKey = ready && keyNeeded && (!jev.keyPresent || replacing);
   const setup = $("jevSetup");
   if (setup.hidden === needKey) { setup.hidden = !needKey; if (needKey && replacing) $("jevKey").focus(); }
+  if (needKey) renderKeyStep(t, choice);
   $("keyCancel").hidden = !replacing;
-  $("jevReady").hidden = !!off || needKey;
-  if (off || needKey) return;
+  $("jevReady").hidden = !ready || needKey;
+  if (!ready || needKey) return;
   const sw = $<HTMLInputElement>("jevSwitch");
-  sw.checked = s.jev!.on;
-  sw.disabled = s.jev!.envOverride;
-  setText($("jevNote"), s.jev!.envOverride ? "Fixed by `BROWSTEER_JEV` where the bridge runs" : "Key saved in `~/.config/typesafe/env`");
+  sw.checked = jev.on;
+  sw.disabled = jev.envOverride;
+  $("switchText").textContent = !t || t.provider === "typesafe" ? "Send page outlines to TypeSafe" : t.local ? `Use the model on this computer` : `Send page outlines to ${t.label}`;
+  const keyFile = !t || t.provider === "typesafe" ? "~/.config/typesafe/env" : "~/.browsteer/keys.env";
+  const what = openai && t?.model ? `${t.model} · ` : "";
+  setText($("jevNote"), jev.envOverride ? "Fixed by `BROWSTEER_JEV` where the bridge runs" : !keyNeeded ? `${what}No key needed on this computer` : `${what}Key saved in \`${keyFile}\``);
+  $("keyActions").hidden = !keyNeeded;
+  renderTest(t);
+}
+
+/** Step 1 of adding a key: where to get one. */
+function renderKeyStep(t: TargetingInfo | null, choice: Choice) {
+  const step = $("keyStep");
+  const label = !t || t.provider === "typesafe" ? "TypeSafe" : t.label;
+  if (choice.keyUrl) {
+    const a = document.createElement("a");
+    a.href = choice.keyUrl; a.rel = "noopener"; a.target = "_blank"; a.textContent = choice.keyWhere ?? choice.keyUrl;
+    step.replaceChildren("Create an API key at ", a, ".");
+  } else if (choice.keyWhere) step.replaceChildren(`Create an API key in ${choice.keyWhere}.`);
+  else step.replaceChildren(`Get an API key for ${t?.host || "the service"}.`);
+  const input = $<HTMLInputElement>("jevKey");
+  input.placeholder = `${label} API key`;
+  input.setAttribute("aria-label", `${label} API key`);
+  setText($("keyFile"), `Saved in \`${!t || t.provider === "typesafe" ? "~/.config/typesafe/env" : "~/.browsteer/keys.env"}\`, readable only by you. Never stored in the browser.`);
+}
+
+// ── Models ───────────────────────────────────────────────────────────────────
+// Asked from the bridge, which holds the key: once per provider + address + key.
+let models: { sig: string; list: string[]; error: string | null; loading: boolean } = { sig: "", list: [], error: null, loading: false };
+function renderModels(t: TargetingInfo, keyPresent: boolean) {
+  const canList = !!t.host && keyPresent;
+  const sig = `${t.preset}|${t.baseUrl}|${keyPresent}`;
+  if (canList && sig !== models.sig) { models = { sig, list: [], error: null, loading: true }; loadModels(); }
+  const sel = $<HTMLSelectElement>("model");
+  const list = !t.model || models.list.includes(t.model) ? models.list : [t.model, ...models.list];
+  const placeholder = !t.host ? "Save the address first" : !keyPresent ? "Add the key first" : models.loading ? "Loading models…" : list.length ? "Choose a model" : "No models listed";
+  const want = JSON.stringify([list, t.model, placeholder]);
+  if (sel.dataset.sig !== want && document.activeElement !== sel) {
+    const first = new Option(placeholder, "", !t.model, !t.model);
+    first.disabled = true;
+    sel.replaceChildren(first, ...list.map((m) => new Option(m, m, false, m === t.model)));
+    sel.value = t.model;
+    sel.dataset.sig = want;
+  }
+  sel.disabled = !canList && !t.model;
+  $("modelReload").hidden = !canList;
+  const note = models.error ? `Couldn't load the model list: ${models.error}` : canList && !t.model && !models.loading ? "Choose the model that should answer." : "";
+  $("modelNote").hidden = !note;
+  $("modelNote").textContent = note;
+}
+async function loadModels() {
+  const s = await send("listModels");
+  const r = s?.reply as { type: string; models?: unknown; error?: unknown } | undefined;
+  models.loading = false;
+  if (r?.type === "models") {
+    models.list = Array.isArray(r.models) ? r.models.filter((m): m is string => typeof m === "string" && MODEL_RE.test(m)) : [];
+    models.error = typeof r.error === "string" ? r.error : null;
+  } else models.error = "the bridge didn't answer.";
+  render(s ?? last);
+}
+
+// ── Test ─────────────────────────────────────────────────────────────────────
+// The bridge runs three canned pages (bridge/targeting-tasks.ts), never one of yours.
+let testing = false;
+let testResult: TestResult | null = null;
+let testFor = "";
+function renderTest(t: TargetingInfo | null) {
+  const forNow = `${t?.provider}|${t?.preset}|${t?.baseUrl}|${t?.model}`;
+  if (forNow !== testFor) { testFor = forNow; testResult = null; }
+  const btn = $<HTMLButtonElement>("testBtn");
+  const noModel = t?.provider === "openai" && !t.model;
+  btn.disabled = testing || noModel;
+  btn.textContent = testing ? "Testing…" : "Test";
+  const rows = $("testRows");
+  const r = testResult;
+  // What Test found beats what the bridge remembers.
+  const cal = r?.rows && typeof r.calibrated === "boolean" && t ? { ...t, calibrated: r.calibrated } : t;
+  setText($("calNote"), calibrationText(cal));
+  if (!r) {
+    rows.hidden = true;
+    $("testSummary").textContent = noModel ? "Choose a model first." : testing ? "Asking the model about three sample pages…" : "Runs three sample pages (not yours) through the model.";
+    return;
+  }
+  if (!r.rows?.length) { rows.hidden = true; $("testSummary").textContent = `Test failed: ${r.error ?? "no answer"}`; return; }
+  const right = r.rows.filter((x) => x.correct).length;
+  const ms = [...r.rows.map((x) => x.ms)].sort((a, b) => a - b)[Math.floor(r.rows.length / 2)];
+  $("testSummary").textContent = `${right} of ${r.rows.length} right · median ${ms} ms · ${r.calibrated ? "calibrated" : "uncalibrated"}`;
+  rows.replaceChildren(...r.rows.map((x) => {
+    const li = document.createElement("li");
+    const ic = document.createElement("span");
+    ic.dataset.icon = x.correct ? "open" : "remove";
+    ic.dataset.size = "16";
+    const what = document.createElement("span");
+    what.textContent = `“${x.target}”`;
+    const verdict = document.createElement("small");
+    verdict.textContent = !x.ok ? "no answer" : x.correct ? `right, ${Math.round(x.p * 100)}% sure` : `wrong: ${x.picked}`;
+    what.append(verdict);
+    const time = document.createElement("span");
+    time.className = "ms";
+    time.textContent = `${x.ms} ms`;
+    li.append(ic, what, time);
+    return li;
+  }));
+  drawIcons(rows);
+  rows.hidden = false;
 }
 
 // Safe choices apply at once; dangerous ones ask first.
-function guarded(name: string, danger: string, confirmId: string, yesId: string, apply: (v: string) => Promise<void>) {
+function guarded(name: string, danger: string, confirmId: string, yesId: string, apply: (v: string) => Promise<unknown>) {
   for (const r of radios(name)) r.addEventListener("change", () => {
     if (!r.checked) return;
     const card = radios(name).find((x) => x.value === danger)!.closest(".choice") as HTMLElement;
@@ -139,7 +273,8 @@ $<HTMLFormElement>("addSite").addEventListener("submit", (e) => {
 });
 $("newSite").addEventListener("input", () => { siteError(""); $("siteAdded").hidden = true; });
 
-// The key goes to the bridge, which writes it to ~/.config/typesafe/env. The field is cleared at once.
+// The key goes to the bridge, which writes it to ~/.config/typesafe/env (TypeSafe) or
+// ~/.browsteer/keys.env (the others). The field is cleared at once.
 function keyError(msg: string) { $("keyError").textContent = msg; $("keyError").hidden = !msg; $("jevKey").setAttribute("aria-invalid", String(!!msg)); }
 $<HTMLFormElement>("jevKeyForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -150,7 +285,7 @@ $<HTMLFormElement>("jevKeyForm").addEventListener("submit", async (e) => {
   keyError("");
   input.value = "";
   replacing = false;
-  await save("setJevKey", { key });
+  await save(newBridge() ? "setTargetingKey" : "setJevKey", { key });
 });
 $("jevKey").addEventListener("input", () => keyError(""));
 $("jevReplace").addEventListener("click", () => { replacing = true; render(last); });
@@ -161,9 +296,37 @@ $("jevRemove").addEventListener("click", async () => {
   if (Date.now() - removeArmed > 4000) { removeArmed = Date.now(); $("jevRemove").textContent = "Click again to delete the key"; setTimeout(() => { $("jevRemove").textContent = "Delete key"; }, 4000); return; }
   removeArmed = 0;
   $("jevRemove").textContent = "Delete key";
-  await save("removeJevKey");
+  await save(newBridge() ? "removeTargetingKey" : "removeJevKey");
 });
 $("jevSwitch").addEventListener("change", (e) => save("setJev", { value: (e.target as HTMLInputElement).checked }));
+
+// Provider, address and model. Each change saves at once, like the rest of the page.
+function baseError(msg: string) { $("baseError").textContent = msg; $("baseError").hidden = !msg; $("baseUrl").setAttribute("aria-invalid", String(!!msg)); }
+$<HTMLSelectElement>("provider").addEventListener("change", async (e) => {
+  replacing = false; baseDirty = false; baseError(""); keyError("");
+  await save("setTargeting", { choice: (e.target as HTMLSelectElement).value });
+  if ((e.target as HTMLSelectElement).value === "custom" && !last?.jev?.targeting?.baseUrl) $("baseUrl").focus();
+});
+$("baseUrl").addEventListener("input", () => { baseDirty = true; baseError(""); });
+$<HTMLFormElement>("baseForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const url = $<HTMLInputElement>("baseUrl").value.trim();
+  if (!url) return baseError("Type the API address, like https://api.example.com/v1.");
+  const s = await save("setTargeting", { choice: "custom", baseUrl: url });
+  const error = typeof s?.reply?.error === "string" ? s.reply.error : "";
+  baseError(error);
+  if (!error) baseDirty = false;
+});
+$<HTMLSelectElement>("model").addEventListener("change", (e) => save("setTargeting", { choice: choiceOf(last?.jev?.targeting), model: (e.target as HTMLSelectElement).value }));
+$("modelReload").addEventListener("click", () => { models.sig = ""; render(last); });
+$("testBtn").addEventListener("click", async () => {
+  testing = true; testResult = null; render(last);
+  const s = await send("testTargeting");
+  testing = false;
+  const r = s?.reply;
+  testResult = r?.type === "targetingTest" ? (r as unknown as TestResult) : { ok: false, error: "the bridge didn't answer in time." };
+  render(s ?? last);
+});
 
 $("ver").textContent = `v${ext.runtime.getManifest().version}`;
 

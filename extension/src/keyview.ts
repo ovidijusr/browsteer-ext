@@ -3,15 +3,18 @@
 import { ext } from "./ext";
 
 import type { Settings } from "./policy";
+import type { TargetingInfo } from "./targeting";
 
-/** Semantic targeting (Jev), as the bridge reports it. Never carries the API key itself. */
+/** Semantic targeting, as the bridge reports it. Never carries the API key itself. */
 export type JevState = {
-  /** Page outlines go to api.typesafe.ai on find/pursue. */
+  /** Page outlines go to the provider on find/pursue. */
   on: boolean;
-  /** A TYPESAFE_API_KEY is in the bridge's environment or ~/.config/typesafe/env. */
+  /** The bridge has a key for the provider (or the provider is on this computer and needs none). */
   keyPresent: boolean;
   /** BROWSTEER_JEV is set where the bridge runs, which overrides the saved setting. */
   envOverride: boolean;
+  /** Which model answers (null from bridges before 2.2.0, which only know TypeSafe). */
+  targeting: TargetingInfo | null;
 };
 
 export type Status = {
@@ -35,6 +38,8 @@ export type Status = {
   refused: string | null;
   /** The setup guide was finished (or the extension was updated from an earlier version). */
   setupDone: boolean;
+  /** The bridge's answer to the message just sent, when it has one (provider error, model list, test result). */
+  reply?: { type: string; [k: string]: unknown };
 };
 
 /** Send a command to the background; every command answers with the new status. */

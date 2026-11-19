@@ -61,13 +61,39 @@
 
     <section id="jev" aria-labelledby="jevHead">
       <h2 id="jevHead">Find controls by description <span class="tag">Optional</span></h2>
-      <p class="sub">Claude asks for “the Save button” instead of reading the whole page first, which is faster on large pages. It uses Jev, a paid model from TypeSafe.</p>
-      <p class="privacy">While it's on, each lookup sends the page address, title, control names and visible text to <code>api.typesafe.ai</code>. Password values never leave this computer.</p>
+      <p class="sub">Claude asks for “the Save button” instead of reading the whole page first, which is faster on large pages. A language model picks the control.</p>
 
       <p class="hint-box" id="jevOff" hidden></p>
 
+      <div class="provider" id="providerBlock" hidden>
+        <label class="field-label first" for="provider">Model provider</label>
+        <select id="provider" class="select">
+          <option value="typesafe">TypeSafe Jev</option>
+          <option value="nexos">nexos.ai</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="ollama">Local (Ollama)</option>
+          <option value="custom">Custom</option>
+        </select>
+        <div id="endpoint" hidden>
+          <label class="field-label" for="baseUrl">API address</label>
+          <form class="add" id="baseForm" novalidate>
+            <input id="baseUrl" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="baseError" />
+            <button class="btn" type="submit" id="baseSave">Save</button>
+          </form>
+          <p class="error" id="baseError" hidden></p>
+          <label class="field-label" for="model">Model</label>
+          <div class="add">
+            <select id="model" class="select" aria-describedby="modelNote"></select>
+            <button class="btn" type="button" id="modelReload">Reload list</button>
+          </div>
+          <p class="field-note" id="modelNote" hidden></p>
+        </div>
+      </div>
+
+      <p class="privacy" id="privacy">While it's on, each lookup sends the page address, title, control names and visible text to <code>api.typesafe.ai</code>. Password values never leave this computer.</p>
+
       <ol class="steps" id="jevSetup" hidden>
-        <li>Create an API key at <a href="https://console.typesafe.ai/keys" rel="noopener" target="_blank">console.typesafe.ai/keys</a>.</li>
+        <li id="keyStep"></li>
         <li>
           <span>Paste it here.</span>
           <form class="add" id="jevKeyForm" novalidate>
@@ -76,13 +102,21 @@
             <button class="btn" type="button" id="keyCancel" hidden>Cancel</button>
           </form>
           <p class="error" id="keyError" hidden></p>
-          <small>Saved in <code>~/.config/typesafe/env</code>, readable only by you. Never stored in the browser.</small>
+          <small id="keyFile">Saved in <code>~/.config/typesafe/env</code>, readable only by you. Never stored in the browser.</small>
         </li>
       </ol>
 
       <div class="jev-on" id="jevReady" hidden>
-        <label class="switch-line"><span>Send page outlines to TypeSafe<small id="jevNote">Key saved in ~/.config/typesafe/env</small></span><input type="checkbox" role="switch" id="jevSwitch" /></label>
-        <div class="key-actions"><button class="link" type="button" id="jevReplace">Replace key</button><button class="link danger-link" type="button" id="jevRemove">Delete key</button></div>
+        <label class="switch-line"><span><span id="switchText">Send page outlines to TypeSafe</span><small id="jevNote">Key saved in ~/.config/typesafe/env</small></span><input type="checkbox" role="switch" id="jevSwitch" /></label>
+        <div class="test-box" id="testBox">
+          <div class="test-head">
+            <button class="btn" type="button" id="testBtn">Test</button>
+            <span id="testSummary" role="status" aria-live="polite">Runs three sample pages (not yours) through the model.</span>
+          </div>
+          <ul class="test-rows" id="testRows" hidden></ul>
+          <p class="field-note" id="calNote"></p>
+        </div>
+        <div class="key-actions" id="keyActions"><button class="link" type="button" id="jevReplace">Replace key</button><button class="link danger-link" type="button" id="jevRemove">Delete key</button></div>
       </div>
 
     </section>

@@ -8,7 +8,7 @@
 //
 // Pages: /popup.html?state=<name>&theme=light|dark, /welcome.html?state=… (setup
 // guide; use setup-1, setup-2, setup-3, setup-finished) and /options.html?state=…
-// (&open=more opens every <details>). theme forces the colour scheme by rewriting
+// (&open=more opens every <details>; &section=jev shows only that section). theme forces the colour scheme by rewriting
 // the prefers-color-scheme block in ui.css, so both themes can be shot without
 // changing the OS setting. --dist points at another build, e.g. a copy of main,
 // for before/after comparisons. Nothing here is part of the extension.
@@ -31,6 +31,7 @@ export const STATES = [
   "fresh", "setup-1", "setup-2", "setup-3", "setup-finished",
   "bridge-off", "refused", "locked", "locked-allowed", "ending", "jev-ready-on", "armed", "allowed", "blocked", "read-only", "mismatch", "bridge-old", "firefox-old",
   "no-site", "every-site", "always-on", "wide-open", "jev-on", "jev-no-key", "jev-key-off", "picked", "setup-done",
+  "jev-nexos-on", "jev-nexos-no-key", "jev-nexos-uncal", "jev-local", "jev-custom", "jev-old-bridge",
 ];
 
 const TYPES: Record<string, string> = {

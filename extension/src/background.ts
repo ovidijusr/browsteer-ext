@@ -10,6 +10,7 @@ import { ext, isFirefox } from "./ext";
 import { siteOf } from "./site";
 import { DEFAULT_SETTINGS, alwaysOnPatch, armUntil, KEY_RE, genKey, hostOf, isArmed, refusal, siteAllowed, type Settings } from "./policy";
 import type { JevState } from "./keyview";
+import { REPLY, hubMessage, readTargeting } from "./targeting";
 
 // 8787 unless the build was made with BRIDGE_PORT set (scripts/build.ts), which
 // also writes the same port into the manifest's connect-src.
@@ -37,24 +38,32 @@ let lastConnect = 0;
 
 // ── Semantic targeting (Jev) ──────────────────────────────────────────────────
 // A setting of the bridge, not of the extension: the bridge reports it, and the
-// popup and setup page may ask the bridge to switch it on or off. That is the
-// only bridge setting the extension can change. The API key never comes here;
-// the bridge says only whether it has one.
+// popup and Settings page may ask the bridge to switch it on or off, pick the
+// provider (TypeSafe Jev, nexos.ai, OpenRouter, a local Ollama, a custom address)
+// and its model, save a key, or run a test. Those are the only bridge settings the
+// extension can change. The API key never comes back here; the bridge says only
+// whether it has one.
 let jev: JevState | null = null;
 let jevAsked = 0;
-const jevWaiters: (() => void)[] = [];
+const hubWaiters = new Map<string, ((m: any) => void)[]>();
 function readJev(v: any): JevState | null {
   return v && typeof v === "object" && typeof v.on === "boolean"
-    ? { on: v.on, keyPresent: v.keyPresent === true, envOverride: v.envOverride === true }
+    ? { on: v.on, keyPresent: v.keyPresent === true, envOverride: v.envOverride === true, targeting: readTargeting(v.targeting) }
     : null;
 }
-function askJev(msg: { type: "jevStatus" } | { type: "removeJevKey" } | { type: "setJev"; on: boolean } | { type: "setJevKey"; key: string }): Promise<void> {
-  if (ws?.readyState !== WebSocket.OPEN) return Promise.resolve();
-  jevAsked = Date.now();
+/** Send a settings message to the bridge and wait for its answer of `replyType` (null on timeout or no bridge). */
+function askHub(msg: Record<string, unknown>, replyType = "jev", ms = 1500): Promise<any> {
+  if (ws?.readyState !== WebSocket.OPEN) return Promise.resolve(null);
+  if (replyType === "jev") jevAsked = Date.now();
   ws.send(JSON.stringify(msg));
-  // The answer arrives as a {type:"jev"} message; wait briefly so the page shows it.
-  return new Promise((done) => { jevWaiters.push(done); setTimeout(done, 1500); });
+  return new Promise((done) => {
+    const list = hubWaiters.get(replyType) ?? [];
+    list.push(done);
+    hubWaiters.set(replyType, list);
+    setTimeout(() => done(null), ms);
+  });
 }
+const askJev = (msg: Record<string, unknown>) => askHub(msg);
 
 function log(...a: unknown[]) {
   console.log("[browsteer]", ...a);
@@ -250,7 +259,11 @@ function connect() {
       return;
     }
     if ((req as any).type === "registered") { refused = null; hubVersion = typeof (req as any).hubVersion === "string" ? (req as any).hubVersion : null; bridgeDir = typeof (req as any).dir === "string" ? (req as any).dir : null; jev = readJev((req as any).jev); return; }
-    if ((req as any).type === "jev") { jev = readJev(req); jevWaiters.splice(0).forEach((f) => f()); return; }
+    if ((req as any).type === "jev" || (req as any).type === "models" || (req as any).type === "targetingTest") {
+      if ((req as any).type === "jev") jev = readJev(req);
+      hubWaiters.get((req as any).type)?.splice(0).forEach((f) => f(req));
+      return;
+    }
     try {
       await settingsReady;
       const gate = (host: string | null) => { const no = refusal(settings, req.op, req.params, host); if (no) throw new Error(no); };
@@ -426,7 +439,14 @@ ext.runtime.onMessage.addListener((msg: any, sender: any, send: (r: unknown) => 
   if ("host" in msg) { msg.host = hostOf(`https://${String(msg.host)}`); if (!msg.host) return false; }
   // Each change is computed after the stored settings have loaded: a background
   // that was just woken would otherwise build the new lists from empty defaults.
-  const reply = (change?: () => unknown) => { settingsReady.then(() => change?.()).then(() => status()).then(send, () => send(null)); return true; };
+  // A bridge answer (provider error, model list, test result) rides along as `reply`.
+  const reply = (change?: () => unknown) => {
+    settingsReady.then(() => change?.()).then(async (r: any) => {
+      const s = await status();
+      return r && typeof r === "object" && typeof r.type === "string" ? { ...s, reply: r } : s;
+    }).then(send, () => send(null));
+    return true;
+  };
   switch (msg.type) {
     case "getStatus": return reply();
     case "regenerate": return reply(() => regenerateKey());
@@ -450,6 +470,13 @@ ext.runtime.onMessage.addListener((msg: any, sender: any, send: (r: unknown) => 
       const key = typeof msg.key === "string" ? msg.key.trim() : "";
       if (!/^[!-~]{8,512}$/.test(key)) return reply();
       return reply(() => askJev({ type: "setJevKey", key }));
+    }
+    // Provider, model, key and Test from the Settings page: cleaned here, checked again by the bridge.
+    case "setTargeting": case "setTargetingKey": case "removeTargetingKey": case "listModels": case "testTargeting": {
+      const out = hubMessage(msg);
+      if (!out) return reply();
+      const r = REPLY[msg.type];
+      return reply(() => askHub(out, r.type, r.ms));
     }
     case "unlockSite": return reply(() => { if (ws?.readyState === WebSocket.OPEN) ws.send('{"type":"unlock"}'); });
     case "finishSetup": return reply(() => ext.storage.local.set({ setupDone: true }));
